@@ -56,8 +56,7 @@ async def connect(request: MCPRequest) -> str:
     link = await request.elicit(
         "grant", URLElicitation("https://ext.example/connect", message="Connect your account.")
     )
-    if link.action != "accept":
-        return "Not connected."
+    assert link.action == "accept"
     return "Connected."
 
 
