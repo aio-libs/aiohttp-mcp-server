@@ -2,7 +2,7 @@
 
 import sys
 from collections.abc import Awaitable, Callable, Collection, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Literal
 
 if sys.version_info >= (3, 12):
@@ -10,6 +10,7 @@ if sys.version_info >= (3, 12):
 else:
     from typing_extensions import TypeAliasType
 
+from ._completion import CompletionHandler, _build_completers, _Completer
 from ._content import Content, Icon, TextContent
 from ._handlers import _apply_details, _derive_name, _inspect_handler
 from ._protocol import (
@@ -65,6 +66,8 @@ class Prompt:
         (everything after the summary line) when omitted.
     :param icons: Optional icons for display in user interfaces.
     :param scopes: Scopes required to use this prompt.
+    :param completions: Completion handlers for arguments, keyed by
+        argument name; see :data:`~aiohttp_mcp_server.CompletionHandler`.
     """
 
     handler: PromptHandler
@@ -73,6 +76,9 @@ class Prompt:
     description: str | None = None
     icons: Sequence[Icon] | None = None
     scopes: Collection[str] = ()
+    completions: Mapping[str, CompletionHandler] | None = field(
+        default=None, kw_only=True
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -83,6 +89,7 @@ class _PromptSpec:
     required: frozenset[str]
     known: frozenset[str]
     scopes: frozenset[str]
+    completions: Mapping[str, _Completer]
 
 
 def _build_spec(prompt: Prompt) -> _PromptSpec:
@@ -112,6 +119,9 @@ def _build_spec(prompt: Prompt) -> _PromptSpec:
         required=frozenset(required),
         known=frozenset(p.name for p in parameters),
         scopes=frozenset(prompt.scopes),
+        completions=_build_completers(
+            name, "prompt", prompt.completions, {p.name for p in parameters}
+        ),
     )
 
 

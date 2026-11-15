@@ -13,6 +13,7 @@ from yarl import URL
 
 from ._auth import Authorization
 from ._auth_server import AuthenticateRequest, _Signer
+from ._completion import _CompletionEndpoint
 from ._elicitation import _PendingForm
 from ._prompts import PromptRegistry
 from ._protocol import (
@@ -30,7 +31,7 @@ from ._protocol import (
 )
 from ._resources import ResourceRegistry
 from ._secure_form import RenderForm, handle_form, render_form_default
-from ._tools import ToolRegistry
+from ._tools import RateLimiter, ToolRegistry
 from ._transport import MCPRequest, Method, handle_request
 
 
@@ -74,6 +75,7 @@ class MCPServer:
         resources: ResourceRegistry | None,
         tools: ToolRegistry | None,
         state_secret: bytes | None,
+        completion_rate_limiter: RateLimiter | None,
     ) -> None:
         if not name:
             raise ValueError("name must be a non-empty string")
@@ -117,6 +119,7 @@ class MCPServer:
             "subscriptions/listen": Method(self._listen, streaming=True),
         }
         self._capabilities: ServerCapabilities = {}
+        has_completions = False
 
         if prompts is not None:
             if authorization is None and prompts._scoped:
@@ -126,6 +129,8 @@ class MCPServer:
             self._methods["prompts/get"] = Method(
                 prompts._get, scopes=prompts._get_scopes, input_required=True
             )
+            if any(spec.completions for spec in prompts._specs.values()):
+                has_completions = True
 
         self._resources = resources
         if resources is not None:
@@ -137,6 +142,8 @@ class MCPServer:
             self._methods["resources/read"] = Method(
                 resources._read, scopes=resources._get_scopes, input_required=True
             )
+            if any(spec.completions for spec in resources._templates.values()):
+                has_completions = True
 
         if tools is not None:
             if authorization is None and tools._scoped:
@@ -145,6 +152,14 @@ class MCPServer:
             self._methods["tools/list"] = Method(tools._list)
             self._methods["tools/call"] = Method(
                 tools._call, scopes=tools._get_scopes, input_required=True
+            )
+
+        # https://modelcontextprotocol.io/specification/2026-07-28/server/utilities/completion
+        if has_completions:
+            endpoint = _CompletionEndpoint(prompts, resources, completion_rate_limiter)
+            self._capabilities["completions"] = {}
+            self._methods["completion/complete"] = Method(
+                endpoint._complete, scopes=endpoint._get_scopes
             )
 
     def host_allowed(self, host: str | None) -> bool:

@@ -42,6 +42,9 @@ files of a directory resource.
 
    Custom schemes must adhere to :rfc:`3986#section-3.1`.
 
+Template variables can also offer IDE-style completion while the user
+fills them in; see :doc:`completion`.
+
 Update notifications
 ====================
 

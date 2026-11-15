@@ -146,6 +146,21 @@ Form fields
 
 .. autoclass:: aiohttp_mcp_server.MultiSelectEnumSchema
 
+
+Completion
+==========
+
+.. autoclass:: aiohttp_mcp_server.Completion
+
+.. autotype:: CompletionHandler
+
+   An argument completion function, attached through the ``completions``
+   mapping of a :class:`Prompt` or (template) :class:`Resource`. It receives
+   the argument's current value and may also receive the already-resolved sibling
+   arguments, returning ranked suggestions (or a :class:`Completion`). An optional first
+   parameter annotated :class:`MCPRequest` receives the in-flight request object.
+
+
 Common types
 ============
 

@@ -57,4 +57,5 @@ Table of Contents
    resources
    authorization
    elicitation
+   completion
    api

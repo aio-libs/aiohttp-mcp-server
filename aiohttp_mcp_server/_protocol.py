@@ -49,6 +49,9 @@ INVALID_REQUEST: Final = -32600
 METHOD_NOT_FOUND: Final = -32601
 INVALID_PARAMS: Final = -32602
 INTERNAL_ERROR: Final = -32603
+# Implementation-defined (the spec reserves -32000 to -32019 for legacy
+# SDK-allocated codes; -32000 is the conventional generic server error).
+RATE_LIMITED: Final = -32000
 HEADER_MISMATCH: Final = -32020
 MISSING_CLIENT_CAPABILITY: Final = -32021
 UNSUPPORTED_PROTOCOL_VERSION: Final = -32022
@@ -63,6 +66,7 @@ _HTTP_STATUS: Final[Mapping[int, int]] = {
     INVALID_PARAMS: 400,
     # Not mandated in spec.
     INTERNAL_ERROR: 500,
+    RATE_LIMITED: 429,
     # https://modelcontextprotocol.io/specification/2026-07-28/basic/transports/streamable-http#server-behavior-for-custom-headers
     HEADER_MISMATCH: 400,
     # https://modelcontextprotocol.io/specification/2026-07-28/basic#_meta
@@ -381,6 +385,18 @@ class ReadResourceResult(InputResult):
     contents: Sequence[TextResourceContents | BlobResourceContents]
     ttlMs: int
     cacheScope: Literal["public", "private"]
+
+
+# https://modelcontextprotocol.io/specification/2026-07-28/server/utilities/completion#data-types
+# TODO(PY315): closed=True
+class CompletionValues(TypedDict):
+    values: Sequence[str]
+    total: NotRequired[int]
+    hasMore: NotRequired[bool]
+
+
+class CompleteResult(InputResult):
+    completion: CompletionValues
 
 
 _InputSchema = TypedDict("_InputSchema", {
