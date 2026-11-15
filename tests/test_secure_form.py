@@ -429,7 +429,7 @@ async def test_local_authorization_login_redirect(aiohttp_client: "AiohttpClient
     """Unauthenticated users are sent through LocalAuthorization's login."""
 
     async def check_credentials(username: str, password: str, request: web.Request) -> bool:
-        return False
+        assert False
 
     authorization = LocalAuthorization(
         check_credentials, resource="https://mcp.server.test", secret=b"s" * 32
@@ -459,7 +459,7 @@ async def test_local_authorization_login_redirect(aiohttp_client: "AiohttpClient
 
 async def test_login_redirect_under_sub_application(aiohttp_client: "AiohttpClient") -> None:
     async def check_credentials(username: str, password: str, request: web.Request) -> bool:
-        return False
+        assert False
 
     authorization = LocalAuthorization(
         check_credentials, resource="https://mcp.server.test/api", secret=b"s" * 32

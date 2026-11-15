@@ -32,11 +32,10 @@ Client = TestClient[web.Request, web.Application]
 
 
 def mcp_post(
-    client: Client, *, token: str | None = None
+    client: Client, *, token: str
 ) -> AbstractAsyncContextManager[ClientResponse]:
     headers = request_headers("server/discover")
-    if token is not None:
-        headers["Authorization"] = f"Bearer {token}"
+    headers["Authorization"] = f"Bearer {token}"
     return client.post("/mcp", json=request_body("server/discover"), headers=headers)
 
 

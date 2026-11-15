@@ -1099,9 +1099,7 @@ async def test_cimd_redirects_not_followed(
     async def bounce(request: web.Request) -> web.Response:
         raise web.HTTPFound(f"http://127.0.0.1:{client.port}/evil.json")
 
-    async def evil(request: web.Request) -> web.Response:
-        return web.json_response({"client_id": client_id, "redirect_uris": [REDIRECT_URI]})
-
+    evil = mock.create_autospec(bounce, spec_set=True, return_value=web.Response())
     app.router.add_get("/client.json", bounce)
     app.router.add_get("/evil.json", evil)
     setup(app, name="test-server", authorization=make_auth())
@@ -1116,6 +1114,7 @@ async def test_cimd_redirects_not_followed(
     ) as resp:
         assert resp.status == 400
         assert "client metadata" in await resp.text()
+    evil.assert_not_awaited()
 
 
 class _StubResolver:
@@ -1182,13 +1181,10 @@ async def test_cimd_dns_rebinding_rejected(make_client: MakeClient) -> None:
     """
     # Canary: a loopback listener the rebound answer points at.  The policy
     # must reject the resolution before any connection is attempted.
-    connections: list[asyncio.StreamWriter] = []
-
-    async def on_connect(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
-        connections.append(writer)
-        writer.close()
-
-    canary = await asyncio.start_server(on_connect, host="127.0.0.1")
+    on_connect = mock.create_autospec(
+        asyncio.Protocol, spec_set=True, return_value=asyncio.Protocol()
+    )
+    canary = await asyncio.get_running_loop().create_server(on_connect, host="127.0.0.1")
     port = canary.sockets[0].getsockname()[1]
     stub = _StubResolver("127.0.0.1", port=port)
     try:
@@ -1211,7 +1207,7 @@ async def test_cimd_dns_rebinding_rejected(make_client: MakeClient) -> None:
     # The rejection must come from the policy resolver, not from a DNS failure
     # or a refused connection: the stub was consulted and nothing was dialed.
     assert stub.requests == ["rebind.test"]
-    assert not connections
+    on_connect.assert_not_called()
 
 
 @pytest.mark.parametrize(

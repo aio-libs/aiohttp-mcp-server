@@ -385,7 +385,7 @@ async def test_content_annotations_on_results(make_client: MakeClient) -> None:
 
 async def test_bare_tool_result_is_unstructured(make_client: MakeClient) -> None:
     async def lookup() -> ToolResult[object]:
-        return ToolResult(content=(TextContent("2 users"),), structured={"count": 2})
+        assert False
 
     client = await make_client(tools=ToolRegistry(lookup))
     async with post(client, "tools/list") as resp:
@@ -536,7 +536,7 @@ async def test_valid_tool_names() -> None:
 
 async def test_registry_config_errors() -> None:
     async def var_args(*args: str) -> str:
-        return ""
+        assert False
 
     with pytest.raises(ValueError):
         ToolRegistry(var_args)
@@ -549,7 +549,7 @@ async def test_registry_config_errors() -> None:
 async def test_bytes_literal_is_uncallable(make_client: MakeClient) -> None:
     """A bytes literal cannot be satisfied from JSON; avoid it in tools."""
     async def download(mode: Literal[b"raw"]) -> str:
-        return mode.decode()
+        assert False
 
     client = await make_client(tools=ToolRegistry(download))
     async with post(client, "tools/list") as resp:
