@@ -31,7 +31,7 @@ async def code_review(language: str, framework: str = "none") -> str:
 
     Reviews code written in the given language.
     """
-    return f"Reviewing {language}/{framework}"
+    assert False
 
 
 async def complete_language(value: str, arguments: Mapping[str, str]) -> Sequence[str]:
@@ -47,7 +47,7 @@ async def complete_framework(value: str, arguments: Mapping[str, str]) -> Sequen
 
 async def project_file(path: str) -> str:
     """Project file."""
-    return f"contents of {path}"
+    assert False
 
 
 async def complete_path(value: str, arguments: Mapping[str, str]) -> Sequence[str]:
@@ -151,14 +151,20 @@ async def test_not_available_without_completers(make_client: MakeClient) -> None
 
 async def test_completion_object(make_client: MakeClient) -> None:
     async def paged(value: str, arguments: Mapping[str, str]) -> Completion:
-        return Completion(["a", "b"], total=10, has_more=True)
+        if value == "paged":
+            return Completion(["a", "b"], total=10, has_more=True)
+        return Completion(["a", "b"])
 
     client = await make_client(
         prompts=PromptRegistry(Prompt(code_review, completions={"language": paged}))
     )
-    async with complete(client, PROMPT_REF, {"name": "language", "value": ""}) as resp:
+    async with complete(client, PROMPT_REF, {"name": "language", "value": "paged"}) as resp:
         result = await result_of(resp)
     assert result["completion"] == {"values": ["a", "b"], "total": 10, "hasMore": True}
+    # Unset total/has_more are omitted from the wire form.
+    async with complete(client, PROMPT_REF, {"name": "language", "value": ""}) as resp:
+        result = await result_of(resp)
+    assert result["completion"] == {"values": ["a", "b"]}
 
 
 async def test_oversized_sequence_truncated(make_client: MakeClient) -> None:
@@ -197,6 +203,16 @@ async def test_argument_without_completer(make_client: MakeClient) -> None:
     )
     async with complete(client, PROMPT_REF, {"name": "framework", "value": ""}) as resp:
         assert (await result_of(resp))["completion"] == {"values": []}
+
+
+async def test_resource_ref_without_resources(make_client: MakeClient) -> None:
+    """A resource reference on a prompts-only server is an unknown resource."""
+    client = await make_client(prompts=prompts())
+    async with complete(client, RESOURCE_REF, {"name": "path", "value": ""}) as resp:
+        assert resp.status == 400
+        error = (await resp.json())["error"]
+    assert error["code"] == -32602
+    assert "Unknown resource" in error["message"]
 
 
 @pytest.mark.parametrize(
@@ -247,7 +263,7 @@ async def test_registration_validation() -> None:
     with pytest.raises(ValueError, match="unknown prompt argument"):
         PromptRegistry(Prompt(code_review, completions={"nope": complete_language}))
     async def static() -> str:
-        return "static"
+        assert False
 
     with pytest.raises(ValueError, match="require a URI template"):
         ResourceRegistry(
@@ -259,15 +275,50 @@ async def test_registration_validation() -> None:
         )
 
     async def wrong_shape(value: str) -> Sequence[str]:
-        return ()
+        assert False
 
     with pytest.raises(ValueError, match=r"must accept\s+\(value, arguments\)"):
         # The runtime check backs up the static one for untyped callers.
         PromptRegistry(
             Prompt(code_review, completions={"language": wrong_shape})  # type: ignore[dict-item]
         )
+
+    async def keyword_only(*, value: str, arguments: Mapping[str, str]) -> Sequence[str]:
+        assert False
+
+    with pytest.raises(ValueError, match=r"must accept\s+\(value, arguments\)"):
+        # Completion handlers are called positionally.
+        PromptRegistry(
+            Prompt(code_review, completions={"language": keyword_only})  # type: ignore[dict-item]
+        )
+
+    async def required_extra(
+        value: str, arguments: Mapping[str, str], *, extra: str
+    ) -> Sequence[str]:
+        assert False
+
+    with pytest.raises(ValueError, match=r"must accept\s+\(value, arguments\)"):
+        # A parameter beyond (value, arguments) is never fed, so it needs a default.
+        PromptRegistry(
+            Prompt(code_review, completions={"language": required_extra})  # type: ignore[dict-item]
+        )
     with pytest.raises(ValueError, match="at most 100"):
         Completion([str(i) for i in range(101)])
+
+
+async def test_defaulted_extra_parameter(make_client: MakeClient) -> None:
+    """Parameters beyond (value, arguments) are fine when they have defaults."""
+
+    async def defaulted_extra(
+        value: str, arguments: Mapping[str, str], *, extra: str = "ok"
+    ) -> Sequence[str]:
+        return (extra,)
+
+    client = await make_client(
+        prompts=PromptRegistry(Prompt(code_review, completions={"language": defaulted_extra}))
+    )
+    async with complete(client, PROMPT_REF, {"name": "language", "value": ""}) as resp:
+        assert (await result_of(resp))["completion"] == {"values": ["ok"]}
 
 
 # - Scope enforcement ---------------------------------------------------------

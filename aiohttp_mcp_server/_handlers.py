@@ -45,6 +45,7 @@ class _Parameter:
     header: str | None = None
     # The unwrapped type hint, :attr:`inspect.Parameter.empty` when unannotated.
     hint: object = inspect.Parameter.empty
+    keyword_only: bool = False
 
 
 def _derive_name(handler: Callable[..., object], override: str | None, kind: str) -> str:
@@ -100,6 +101,7 @@ def _inspect_handler(
                 documentation=doc,
                 header=header,
                 hint=hint,
+                keyword_only=parameter.kind is parameter.KEYWORD_ONLY,
             )
         )
     return wants_request, parameters

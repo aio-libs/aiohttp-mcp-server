@@ -142,7 +142,11 @@ def _build_completers(
         wants_request, parameters = _inspect_handler(
             handler, name=f"{owner}.{argument}", kind="completion", typed=True
         )
-        if len(parameters) != 2:
+        if (
+            len(parameters) < 2
+            or any(p.keyword_only for p in parameters[:2])
+            or any(p.required for p in parameters[2:])
+        ):
             raise ValueError(
                 f"completion handler for {argument!r} of {owner!r} must accept"
                 " (value, arguments)"

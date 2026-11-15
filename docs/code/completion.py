@@ -31,10 +31,12 @@ def template_completions() -> None:
 
     async def project_file(path: str) -> str:
         """A file from the project directory."""
-        return (PROJECT / path).read_text()
+        target = (PROJECT / path).resolve()
+        target.relative_to(PROJECT)  # Reject paths escaping the project.
+        return target.read_text()
 
     async def complete_path(value: str, arguments: Mapping[str, str]) -> mcp.Completion:
-        matches = sorted(p.name for p in PROJECT.glob(f"{value}*"))
+        matches = sorted(str(p.relative_to(PROJECT)) for p in PROJECT.glob(f"{value}*"))
         return mcp.Completion(matches[:10], total=len(matches), has_more=len(matches) > 10)
 
     resource = mcp.Resource(
