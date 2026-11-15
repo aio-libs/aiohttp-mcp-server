@@ -3,7 +3,7 @@
 import re
 import sys
 from base64 import b64encode
-from collections.abc import Awaitable, Callable, Collection, Sequence
+from collections.abc import Awaitable, Callable, Collection, Mapping, Sequence
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Generic, Literal, TypeVar, overload
 from urllib.parse import unquote
@@ -13,6 +13,7 @@ if sys.version_info >= (3, 12):
 else:
     from typing_extensions import TypeAliasType
 
+from ._completion import CompletionHandler, _build_completers, _Completer
 from ._content import EmbeddedResource, Icon
 from ._handlers import _apply_details, _derive_name, _inspect_handler
 from ._protocol import (
@@ -122,6 +123,8 @@ class Resource:
     :param priority: How important this resource is, from 0 to 1.
     :param last_modified: ISO 8601 timestamp of the last modification.
     :param scopes: Scopes required to use this resource.
+    :param completions: Completion handlers for the URI template's variables,
+        keyed by variable name; see :data:`~aiohttp_mcp_server.CompletionHandler`.
     :param ttl: Seconds a client is recommended to cache the contents for,
         overriding the :class:`.ResourceRegistry`'s ``read_ttl``.
     :param cache_scope: Whether shared intermediaries may cache the contents,
@@ -140,6 +143,7 @@ class Resource:
     priority: float | None = field(default=None, kw_only=True)
     last_modified: str | None = field(default=None, kw_only=True)
     scopes: Collection[str] = ()
+    completions: Mapping[str, CompletionHandler] | None = field(default=None, kw_only=True)
     ttl: float | None = None
     cache_scope: Literal["public", "private"] | None = None
 
@@ -162,6 +166,7 @@ class _ResourceSpec(Generic[_ResourceT]):
     pattern: re.Pattern[str] | None
     decode: frozenset[str]
     scopes: frozenset[str]
+    completions: Mapping[str, _Completer]
 
 
 _AnyResourceSpec = _ResourceSpec[ResourceInfo] | _ResourceSpec[ResourceTemplateInfo]
@@ -231,6 +236,10 @@ def _template_index_key(uri: str) -> str:
 
 def _build_static(resource: Resource) -> _ResourceSpec[ResourceInfo]:
     name, wants_request = _inspect_resource(resource, frozenset())
+    if resource.completions:
+        raise ValueError(
+            f"completions require a URI template; {resource.uri!r} has no variables"
+        )
     info: ResourceInfo = {"uri": resource.uri, "name": name}
     if resource.size is not None:
         info["size"] = resource.size
@@ -242,6 +251,7 @@ def _build_static(resource: Resource) -> _ResourceSpec[ResourceInfo]:
         pattern=None,
         decode=frozenset(),
         scopes=frozenset(resource.scopes),
+        completions={},
     )
 
 
@@ -260,6 +270,9 @@ def _build_template(
         pattern=pattern,
         decode=decode,
         scopes=frozenset(resource.scopes),
+        completions=_build_completers(
+            name, "template", resource.completions, frozenset(pattern.groupindex)
+        ),
     )
 
 

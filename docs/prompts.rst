@@ -32,6 +32,9 @@ access to the underlying :class:`~aiohttp.web.Request`, the client's
 identity, and the validated token of an authorized caller. It is not
 advertised as a prompt argument.
 
+Prompt arguments can also offer IDE-style completion while the user fills
+them in; see :doc:`completion`.
+
 Results
 =======
 

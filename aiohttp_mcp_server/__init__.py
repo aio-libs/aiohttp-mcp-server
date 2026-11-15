@@ -1,6 +1,7 @@
 """MCP (Model Context Protocol) server support for aiohttp."""
 
 from collections.abc import Callable, Collection
+from types import EllipsisType
 from typing import Literal
 
 from aiohttp import web
@@ -14,6 +15,7 @@ from ._auth_server import (
     LocalAuthorization,
     RenderConsent,
 )
+from ._completion import Completion, CompletionHandler
 from ._content import (
     AudioContent,
     Content,
@@ -71,6 +73,8 @@ __all__ = (
     "Authorization",
     "BooleanSchema",
     "CheckCredentials",
+    "Completion",
+    "CompletionHandler",
     "ConsentContext",
     "Content",
     "Doc",
@@ -143,6 +147,8 @@ def setup(
     resources: ResourceRegistry | None = None,
     tools: ToolRegistry | None = None,
     state_secret: bytes | None = None,
+    # TODO(PY315): Use sentinel()
+    completion_rate_limiter: RateLimiter | None | EllipsisType = ...,
     authenticate_request: AuthenticateRequest | None = None,
     render_form: RenderForm | None = None,
 ) -> MCPServer:
@@ -188,6 +194,11 @@ def setup(
     :param state_secret: Key used for signing when using :meth:`.MCPRequest.elicit`.
         Random when omitted, which invalidates in-flight requests on restart and
         breaks them across workers.
+    :param completion_rate_limiter: Limits the completion requests of each
+        caller, across every prompt and resource template; see
+        :class:`RateLimiter`, which can also be a subclass for custom keying
+        or strategies. Pass :data:`None` to disable rate
+        limiting (e.g. if rate limiting is handled by a proxy).
     :param authenticate_request: Returns the authenticated browser user for a
         request, enabling :class:`SecureFormElicitation` pages to verify who
         opened them. Not needed with :class:`LocalAuthorization`, whose login
@@ -222,6 +233,9 @@ def setup(
         resources=resources,
         tools=tools,
         state_secret=state_secret,
+        completion_rate_limiter=RateLimiter()
+        if completion_rate_limiter is Ellipsis
+        else completion_rate_limiter,
     )
     app.router.add_post(path, server._handle)
     if authorization is not None:
