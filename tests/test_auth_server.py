@@ -1099,8 +1099,6 @@ async def test_cimd_redirects_not_followed(
     async def bounce(request: web.Request) -> web.Response:
         raise web.HTTPFound(f"http://127.0.0.1:{client.port}/evil.json")
 
-    # A mock with a handler's signature, not a handler with ``assert False``: its
-    # 500 would be indistinguishable from the redirect being refused.
     evil = mock.create_autospec(bounce, spec_set=True, return_value=web.Response())
     app.router.add_get("/client.json", bounce)
     app.router.add_get("/evil.json", evil)
