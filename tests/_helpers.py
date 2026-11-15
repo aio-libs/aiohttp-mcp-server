@@ -54,26 +54,23 @@ async def next_sse(resp: ClientResponse) -> tuple[str, Any] | None:
 
     ``None`` on end of stream.
     """
-    data: list[str] = []
-    while True:
-        raw = await resp.content.readline()
-        if not raw:
-            return None
-        line = raw.decode().rstrip("\r\n")
-        if not line:
-            if data:
-                return ("data", json.loads("\n".join(data)))
-            continue
-        if line.startswith(":"):
-            return ("comment", line[1:].strip())
-        if line.startswith("data:"):
-            data.append(line[5:].lstrip())
+    raw = await resp.content.readline()
+    if not raw:
+        return None
+    line = raw.decode().rstrip("\r\n")
+    # Every event the server sends is a single line, ended by a blank one.
+    blank = await resp.content.readline()
+    assert not blank.strip(), blank
+    if line.startswith(":"):
+        return ("comment", line[1:].strip())
+    assert line.startswith("data:"), line
+    return ("data", json.loads(line[5:]))
 
 
 async def next_sse_data(resp: ClientResponse) -> Any:
-    """Next ``data`` event, skipping keep-alive comments."""
-    while True:
-        event = await next_sse(resp)
-        assert event is not None, "unexpected end of SSE stream"
-        if event[0] == "data":
-            return event[1]
+    """The next event, which must be a ``data`` event."""
+    event = await next_sse(resp)
+    assert event is not None, "unexpected end of SSE stream"
+    kind, value = event
+    assert kind == "data", event
+    return value
