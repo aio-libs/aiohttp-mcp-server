@@ -529,7 +529,7 @@ async def test_scopes_generator_yields_twice(aiohttp_client: AiohttpClient) -> N
 
 
 async def open_item() -> str:
-    return "open"
+    assert False
 
 
 async def secret_item() -> str:
