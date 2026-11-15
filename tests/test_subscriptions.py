@@ -15,7 +15,7 @@ from _helpers import (
     request_body,
     request_headers,
 )
-from aiohttp_mcp_server._protocol import InputResult, JSONRPCNotification
+from aiohttp_mcp_server._protocol import JSONRPCNotification
 from aiohttp_mcp_server._transport import MCPRequest, Method
 
 
@@ -75,13 +75,12 @@ async def test_emit_from_simple_method(aiohttp_client: AiohttpClient) -> None:
     app = web.Application()
     server = mcp.setup(app, name="test-server", version="1.2.3")
 
-    async def bad(req: MCPRequest) -> InputResult:
+    async def bad(req: MCPRequest) -> None:
         notification: JSONRPCNotification = {
             "jsonrpc": "2.0",
             "method": "notifications/progress",
         }
         await req._emit(notification)
-        assert False
 
     server._methods = {**server._methods, "test/emit": Method(bad)}
     client = await aiohttp_client(app)
