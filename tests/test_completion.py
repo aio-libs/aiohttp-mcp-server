@@ -18,7 +18,7 @@ from aiohttp_mcp_server import (
     Resource,
     ResourceRegistry,
     TokenInfo,
-    setup
+    setup,
 )
 
 Client = TestClient[web.Request, web.Application]
@@ -206,8 +206,8 @@ async def test_argument_without_completer(make_client: MakeClient) -> None:
         ({"ref": {"type": "ref/resource", "uri": "file:///nope"}}, "Unknown resource"),
         (
             {"ref": {"type": "ref/other"}},
-            "ref: Input tag 'ref/other' found using 'type' does not match any"
-            " of the expected tags: 'ref/prompt', 'ref/resource'",
+            ("ref: Input tag 'ref/other' found using 'type' does not match any"
+            " of the expected tags: 'ref/prompt', 'ref/resource'"),
         ),
         ({"ref": {"type": "ref/prompt"}}, "Field required"),
         ({"ref": "code_review"}, "ref: Input should be a valid dictionary"),
