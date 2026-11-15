@@ -81,7 +81,7 @@ async def test_emit_from_simple_method(aiohttp_client: AiohttpClient) -> None:
             "method": "notifications/progress",
         }
         await req._emit(notification)
-        return {}
+        assert False
 
     server._methods = {**server._methods, "test/emit": Method(bad)}
     client = await aiohttp_client(app)

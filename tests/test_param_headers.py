@@ -163,7 +163,7 @@ async def test_unrecognized_param_headers_ignored(make_client: MakeClient) -> No
 )
 async def test_invalid_header_definitions(annotation: object) -> None:
     async def bad(value) -> str:  # type: ignore[no-untyped-def]
-        return ""
+        assert False
 
     bad.__annotations__["value"] = annotation
     with pytest.raises(ValueError):
@@ -174,7 +174,7 @@ async def test_case_insensitive_uniqueness() -> None:
     async def clash(
         a: Annotated[str, Header("Region")], b: Annotated[str, Header("region")]
     ) -> str:
-        return ""
+        assert False
 
     with pytest.raises(ValueError, match="duplicate x-mcp-header"):
         ToolRegistry(clash)
