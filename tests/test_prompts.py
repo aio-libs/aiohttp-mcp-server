@@ -40,13 +40,10 @@ def post(
     params: dict[str, object] | None = None,
     *,
     name: str | None = None,
-    token: str | None = None,
 ) -> AbstractAsyncContextManager[ClientResponse]:
     headers = request_headers(method)
     if name is not None:
         headers["Mcp-Name"] = name
-    if token is not None:
-        headers["Authorization"] = f"Bearer {token}"
     return client.post("/mcp", json=request_body(method, params), headers=headers)
 
 
@@ -54,13 +51,11 @@ def get_prompt(
     client: TestClient[web.Request, web.Application],
     name: str,
     arguments: dict[str, str] | None = None,
-    *,
-    token: str | None = None,
 ) -> AbstractAsyncContextManager[ClientResponse]:
     params: dict[str, object] = {"name": name}
     if arguments is not None:
         params["arguments"] = arguments
-    return post(client, "prompts/get", params, name=name, token=token)
+    return post(client, "prompts/get", params, name=name)
 
 
 async def result_of(resp: ClientResponse) -> dict[str, Any]:
@@ -225,7 +220,7 @@ async def test_foreign_annotated_metadata_ignored(make_client: MakeClient) -> No
         text: Annotated[str, OtherLibraryMarker(), "not a description", Doc("The text")],
         plain_str_meta: Annotated[str, "bare strings are not descriptions"] = "x",
     ) -> str:
-        return text
+        assert False
 
     client = await make_client(prompts=PromptRegistry(mixed))
     async with post(client, "prompts/list") as resp:

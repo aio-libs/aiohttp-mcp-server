@@ -66,14 +66,11 @@ def post(
     params: dict[str, object] | None = None,
     *,
     name: str | None = None,
-    token: str | None = None,
     capabilities: dict[str, object] | None = None,
 ) -> AbstractAsyncContextManager[ClientResponse]:
     headers = request_headers(method)
     if name is not None:
         headers["Mcp-Name"] = name
-    if token is not None:
-        headers["Authorization"] = f"Bearer {token}"
     body = request_body(method, params, capabilities=capabilities)
     return client.post("/mcp", json=body, headers=headers)
 
