@@ -4,12 +4,12 @@ import math
 import sys
 from collections.abc import Awaitable, Callable, Collection, Mapping, Sequence
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Annotated, Final, Literal, NotRequired, TypedDict
+from typing import TYPE_CHECKING, Annotated, Final, Literal, NotRequired
 
 if sys.version_info >= (3, 12):
-    from typing import TypeAliasType
+    from typing import TypeAliasType, TypedDict
 else:
-    from typing_extensions import TypeAliasType
+    from typing_extensions import TypeAliasType, TypedDict
 
 from pydantic import Field, TypeAdapter, ValidationError
 
