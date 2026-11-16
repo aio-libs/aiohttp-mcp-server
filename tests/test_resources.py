@@ -474,9 +474,8 @@ async def test_embed_template_and_annotations(make_client: MakeClient) -> None:
 
 
 async def test_embed_unknown_uri_is_server_error(make_client: MakeClient) -> None:
-    async def broken(request: MCPRequest) -> str:
+    async def broken(request: MCPRequest) -> None:
         await request.embed_resource("docs://missing")
-        assert False
 
     client = await make_client(resources=registry(), tools=ToolRegistry(broken))
     async with tool_call(client, "broken") as resp:
@@ -485,9 +484,8 @@ async def test_embed_unknown_uri_is_server_error(make_client: MakeClient) -> Non
 
 
 async def test_embed_without_resources_configured(make_client: MakeClient) -> None:
-    async def broken(request: MCPRequest) -> str:
+    async def broken(request: MCPRequest) -> None:
         await request.embed_resource("docs://readme")
-        assert False
 
     client = await make_client(tools=ToolRegistry(broken))
     async with tool_call(client, "broken") as resp:
