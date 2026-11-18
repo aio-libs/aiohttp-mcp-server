@@ -17,6 +17,7 @@ from pydantic import Field, TypeAdapter, ValidationError
 from yarl import URL
 
 from . import _protocol
+from ._auth import _LOOPBACK
 from ._auth_server import _Signer
 from ._protocol import (
     INTERNAL_ERROR,
@@ -653,4 +654,19 @@ def _mint_form(
         forms[ticket] = _PendingForm(subject, elicitation, expires)
         heapq.heappush(server._form_expiries, (expires, ticket))
         tickets[key] = ticket
-    return str(ctx.http.url.origin().join(server._form_resource.url_for(ticket=ticket)))
+    return str(_link_origin(ctx.http.url).join(server._form_resource.url_for(ticket=ticket)))
+
+
+def _link_origin(url: URL) -> URL:
+    """The origin for links sent to the user: always https unless local.
+
+    Behind a TLS-terminating reverse proxy the server may see plain http, which
+    would send clients an ``http://`` link to a page that asks the user to
+    sign in. Only loopback hosts (local development) keep plain http.
+    """
+    origin = url.origin()
+    if origin.scheme == "https" or origin.host in _LOOPBACK:
+        return origin
+    port = origin.explicit_port
+    # An explicit :80 is http's default; it does not carry over to https.
+    return origin.with_scheme("https").with_port(None if port == 80 else port)

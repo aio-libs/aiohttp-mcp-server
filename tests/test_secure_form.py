@@ -382,6 +382,31 @@ async def test_not_configured_is_internal_error(
     )
 
 
+@pytest.mark.parametrize(
+    ("host", "origin"),
+    (
+        ("mcp.server.test", "https://mcp.server.test"),
+        ("mcp.server.test:8443", "https://mcp.server.test:8443"),
+        ("mcp.server.test:80", "https://mcp.server.test"),
+    ),
+)
+async def test_link_https_for_non_local_host(
+    make_client: MakeClient, host: str, origin: str
+) -> None:
+    """Ensure a reverse proxy doesn't result in http:// links."""
+    client = await make_secure_client(make_client, allowed_origins=("mcp.server.test",))
+    headers = request_headers("prompts/get")
+    headers["Mcp-Name"] = "set_key"
+    headers["Authorization"] = "Bearer alice-token"
+    headers["Host"] = host
+    body = request_body("prompts/get", {"name": "set_key"}, capabilities=ALL_CAPS)
+    async with client.post("/mcp", json=body, headers=headers) as resp:
+        result = await result_of(resp)
+    url = URL(result["inputRequests"]["creds"]["params"]["url"])
+    assert str(url.origin()) == origin
+    assert url.path.startswith("/mcp/elicit/")
+
+
 async def test_unrecognised_host_rejected(make_client: MakeClient) -> None:
     """A spoofed Host cannot steer the elicitation link off-origin."""
     # Only the resource host is allowed; the TestClient connects via the
