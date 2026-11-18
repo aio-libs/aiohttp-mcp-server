@@ -56,7 +56,7 @@ from ._tools import RateLimiter, Tool, ToolError, ToolHandler, ToolRegistry, Too
 from ._transport import MCPRequest
 from ._validators import IntrospectionAuthorization
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 
 # https://github.com/sphinx-doc/sphinx/issues/6495
 #: Protocol revisions implemented, newest first.
