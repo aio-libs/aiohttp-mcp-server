@@ -8,6 +8,7 @@ import hmac
 import html
 import json
 import logging
+import posixpath
 import secrets
 import socket
 import sys
@@ -450,6 +451,8 @@ class LocalAuthorization(Authorization):
         # Relative paths the login page may redirect back to.
         self._return_prefixes: tuple[str, ...] = ()
         self._extra_return_prefixes: list[Callable[[], str]] = []
+        # Path of the login session cookie; finalised with _return_prefixes.
+        self._cookie_path = ""
         self._signer = _Signer(secret if secret is not None else secrets.token_bytes(32))
         self._grantable_scopes = (
             tuple(grantable_scopes) if grantable_scopes else tuple(default_scopes)
@@ -509,6 +512,9 @@ class LocalAuthorization(Authorization):
         self._return_prefixes = (
             self._endpoint_path("authorize"), *(r() for r in self._extra_return_prefixes)
         )
+        # Cookie path must allow all return prefixes.
+        mount = self._endpoint_path("authorize").removesuffix("/authorize")
+        self._cookie_path = posixpath.commonpath((mount, *self._return_prefixes))
 
     def _endpoint_path(self, name: str) -> str:
         """The real mounted path of one of our endpoints, from the router."""
@@ -849,16 +855,21 @@ class LocalAuthorization(Authorization):
             {"t": "session", "sub": username, "exp": time.time() + self._login_ttl}
         )
         response = web.HTTPSeeOther(location=redirect)
+        self._set_session_cookie(response, request, session)
+        raise response
+
+    def _set_session_cookie(
+        self, response: web.StreamResponse, request: web.Request, session: str
+    ) -> None:
         response.set_cookie(
             _SESSION_COOKIE,
             session,
             max_age=int(self._login_ttl),
-            path=self._endpoint_path("login").removesuffix("/login"),
+            path=self._cookie_path,
             httponly=True,
             samesite="Lax",
-            secure=request.secure,
+            secure=request.secure or request.url.host not in _LOOPBACK,
         )
-        raise response
 
     # - Token endpoint -------------------------------------------------------
 

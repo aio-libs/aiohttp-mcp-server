@@ -263,10 +263,25 @@ async def test_login_sets_scoped_cookie(make_client: MakeClient) -> None:
     async with login(client) as resp:
         assert resp.status == 303
         cookie = resp.cookies["aiohttp_mcp_server_session"]
-    assert cookie["path"] == "/oauth2"
+    # Covers both the OAuth endpoints and the secure-form pages (/mcp/elicit/).
+    assert cookie["path"] == "/"
     assert cookie["httponly"]
     assert cookie["samesite"] == "Lax"
     assert int(cookie["max-age"]) == 86400
+    assert not cookie["secure"]  # Plain http on a local host stays usable.
+
+
+async def test_login_cookie_secure_for_non_localhost(make_client: MakeClient) -> None:
+    client = await make_client(authorization=make_auth())
+    async with client.post(
+        "/oauth2/login",
+        data={"username": "alice", "password": "wonderland", "redirect": "/"},
+        headers={"Host": "mcp.server.test"},
+        allow_redirects=False,
+    ) as resp:
+        assert resp.status == 303
+        cookie = resp.cookies["aiohttp_mcp_server_session"]
+    assert cookie["secure"]
 
 
 async def test_login_wrong_password_reprompts(make_client: MakeClient) -> None:
@@ -977,7 +992,7 @@ async def test_sub_application(aiohttp_client: AiohttpClient) -> None:
         assert resp.status == 303
         assert resp.headers["Location"].startswith("/api/oauth2/authorize")
         cookie = resp.cookies["aiohttp_mcp_server_session"]
-        assert cookie["path"] == "/api/oauth2"  # still scoped to the endpoints
+        assert cookie["path"] == "/api"  # still within the mounted application
         resume = resp.headers["Location"]
 
     async with client.get(resume, allow_redirects=False) as resp:
