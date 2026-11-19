@@ -5,7 +5,6 @@ import logging
 import time
 from collections.abc import Awaitable, Iterator
 from contextlib import AbstractAsyncContextManager
-from http.cookies import SimpleCookie
 from typing import Any
 from unittest import mock
 
