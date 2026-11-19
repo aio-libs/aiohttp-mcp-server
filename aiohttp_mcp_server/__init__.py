@@ -253,7 +253,7 @@ def setup(
         server._form_identity = form_identity
         if render_form is not None:
             server._form_render = render_form
-        resource = app.router.add_resource(f"{path}/elicit/{{ticket}}")
+        resource = app.router.add_resource(f"{path.rstrip('/')}/elicit/{{ticket}}")
         resource.add_route("GET", server._handle_form)
         resource.add_route("POST", server._handle_form)
         server._form_resource = resource

@@ -5,6 +5,7 @@ import logging
 import time
 from collections.abc import Awaitable, Iterator
 from contextlib import AbstractAsyncContextManager
+from http.cookies import SimpleCookie
 from typing import Any
 from unittest import mock
 
@@ -450,26 +451,27 @@ async def test_pending_forms_bounded(aiohttp_client: AiohttpClient) -> None:
         assert page.status == 200  # The newest survive.
 
 
-async def test_local_authorization_login_redirect(aiohttp_client: "AiohttpClient") -> None:
-    """Unauthenticated users are sent through LocalAuthorization's login."""
+async def check_alice(username: str, password: str, request: web.Request) -> bool:
+    return (username, password) == ("alice", "wonderland")
 
-    async def check_credentials(username: str, password: str, request: web.Request) -> bool:
-        assert False
+def mint_alice_form(server: mcp.MCPServer) -> None:
+    # Mint a pending form directly; obtaining an MCP token via the full OAuth
+    # flow is covered by the auth-server tests.
+    expires = time.time() + 60
+    server._forms["test-ticket"] = _PendingForm("alice", API_FORM, expires)
+    heapq.heappush(server._form_expiries, (expires, "test-ticket"))
 
+
+async def test_local_authorization_login_redirect(aiohttp_client: AiohttpClient) -> None:
     authorization = LocalAuthorization(
-        check_credentials, resource="https://mcp.server.test", secret=b"s" * 32
+        check_alice, resource="https://mcp.server.test", secret=b"s" * 32
     )
     app = web.Application()
     server = mcp.setup(
         app, authorization=authorization, prompts=PromptRegistry(set_key)
     )
     client = await aiohttp_client(app)
-
-    # Mint a pending form directly; obtaining an MCP token via the full OAuth
-    # flow is covered by the auth-server tests.
-    expires = time.time() + 60
-    server._forms["test-ticket"] = _PendingForm("alice", API_FORM, expires)
-    heapq.heappush(server._form_expiries, (expires, "test-ticket"))
+    mint_alice_form(server)
 
     async with client.get("/mcp/elicit/test-ticket", allow_redirects=False) as page:
         assert page.status == 303
@@ -481,13 +483,22 @@ async def test_local_authorization_login_redirect(aiohttp_client: "AiohttpClient
         assert login_page.status == 200
         assert "/mcp/elicit/test-ticket" in await login_page.text()
 
+    # Logging in lands on the form: the session cookie must reach the form
+    # page, not just the OAuth endpoints, or login and form redirect forever.
+    credentials = {
+        "username": "alice",
+        "password": "wonderland",
+        "redirect": location.query["redirect"],
+    }
+    async with client.post(location.path, data=credentials) as page:
+        assert page.status == 200
+        assert page.url.path == "/mcp/elicit/test-ticket"
+        assert 'name="api_key"' in await page.text()
 
-async def test_login_redirect_under_sub_application(aiohttp_client: "AiohttpClient") -> None:
-    async def check_credentials(username: str, password: str, request: web.Request) -> bool:
-        assert False
 
+async def test_login_redirect_under_sub_application(aiohttp_client: AiohttpClient) -> None:
     authorization = LocalAuthorization(
-        check_credentials, resource="https://mcp.server.test/api", secret=b"s" * 32
+        check_alice, resource="https://mcp.server.test/api", secret=b"s" * 32
     )
     api = web.Application()
     server = mcp.setup(
@@ -499,10 +510,7 @@ async def test_login_redirect_under_sub_application(aiohttp_client: "AiohttpClie
     root = web.Application()
     root.add_subapp("/api", api)
     client = await aiohttp_client(root)
-
-    expires = time.time() + 60
-    server._forms["test-ticket"] = _PendingForm("alice", API_FORM, expires)
-    heapq.heappush(server._form_expiries, (expires, "test-ticket"))
+    mint_alice_form(server)
 
     async with client.get("/api/mcp/elicit/test-ticket", allow_redirects=False) as page:
         assert page.status == 303
@@ -514,3 +522,40 @@ async def test_login_redirect_under_sub_application(aiohttp_client: "AiohttpClie
     async with client.get(location.path_qs) as login_page:
         assert login_page.status == 200
         assert "/api/mcp/elicit/test-ticket" in await login_page.text()
+
+    credentials = {
+        "username": "alice",
+        "password": "wonderland",
+        "redirect": location.query["redirect"],
+    }
+    async with client.post(location.path, data=credentials) as page:
+        assert page.status == 200
+        assert page.url.path == "/api/mcp/elicit/test-ticket"
+
+
+async def test_login_round_trip_with_root_endpoint(aiohttp_client: AiohttpClient) -> None:
+    """An MCP endpoint at "/" serves forms at /elicit/, not //elicit/."""
+    authorization = LocalAuthorization(
+        check_alice, resource="https://mcp.server.test", secret=b"s" * 32
+    )
+    app = web.Application()
+    server = mcp.setup(
+        app, path="/", authorization=authorization, prompts=PromptRegistry(set_key)
+    )
+    client = await aiohttp_client(app)
+    mint_alice_form(server)
+
+    async with client.get("/elicit/test-ticket", allow_redirects=False) as page:
+        assert page.status == 303
+        location = URL(page.headers["Location"])
+    assert location.query["redirect"] == "/elicit/test-ticket"
+
+    credentials = {
+        "username": "alice",
+        "password": "wonderland",
+        "redirect": location.query["redirect"],
+    }
+    async with client.post(location.path, data=credentials) as page:
+        assert page.status == 200
+        assert page.url.path == "/elicit/test-ticket"
+        assert 'name="api_key"' in await page.text()
