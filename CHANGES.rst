@@ -4,6 +4,17 @@ CHANGES
 
 .. towncrier release notes start
 
+0.2.1 (2026-11-19)
+==================
+
+- Fixed a possible endless redirect between the built-in ``LocalAuthorization`` login
+  page and secure-form elicitation pages after signing in.
+- The ``LocalAuthorization`` login session cookie is now always marked ``Secure``
+  unless the server is addressed by a loopback host, so servers behind a
+  TLS-terminating reverse proxy no longer issue it without that attribute.
+- Secure-form elicitation pages are now served at ``/elicit/...`` rather than
+  ``//elicit/...`` when the MCP endpoint is served at ``/`` (``path="/"``).
+
 0.2.0 (2026-11-18)
 ==================
 
