@@ -241,9 +241,11 @@ async def test_changes_are_announced_by_every_server(aiohttp_client: AiohttpClie
 async def test_burst_of_changes_is_announced_once(
     make_client: MakeClient, mcp_servers: list[MCPServer]
 ) -> None:
+    prompts = PromptRegistry(alpha, dynamic=True)
     tools = ToolRegistry(alpha, dynamic=True)
-    client = await make_client(**serving(FEATURES["tools"], tools))
+    client = await make_client(prompts=prompts, **serving(FEATURES["tools"], tools))
     wanted: dict[str, object] = {
+        "promptsListChanged": True,
         "toolsListChanged": True,
         "resourceSubscriptions": [MARKER],
     }
@@ -252,11 +254,13 @@ async def test_burst_of_changes_is_announced_once(
         # None of these can have been sent before the next is made.
         tools.add(beta)
         tools.add(gamma)
+        prompts.add(beta)
         tools.remove("alpha")
         mcp_servers[0].resource_updated(MARKER)
-        methods = [(await next_sse_data(resp))["method"] for _ in range(2)]
+        methods = [(await next_sse_data(resp))["method"] for _ in range(3)]
     assert methods == [
         "notifications/tools/list_changed",
+        "notifications/prompts/list_changed",
         "notifications/resources/updated",
     ]
 

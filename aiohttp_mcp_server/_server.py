@@ -50,7 +50,7 @@ _FILTER: Final = TypeAdapter(SubscriptionFilter)
 class Subscription:
     """A live ``subscriptions/listen`` stream."""
 
-    __slots__ = ("_last", "_queue", "id", "list_changed", "resource_uris")
+    __slots__ = ("_queue", "_queued", "id", "list_changed", "resource_uris")
 
     def __init__(
         self,
@@ -61,15 +61,29 @@ class Subscription:
         self.id = request_id
         self.list_changed = list_changed
         self.resource_uris = resource_uris
-        self._queue: asyncio.Queue[JSONRPCNotification | None] = asyncio.Queue()
-        self._last: JSONRPCNotification | None = None
+        # The (method, uri) of each notification waiting to be sent.
+        self._queue: asyncio.Queue[tuple[str, str | None] | None] = asyncio.Queue()
+        self._queued = set[tuple[str, str | None]]()
 
-    def _deliver(self, notification: JSONRPCNotification) -> None:
+    def _deliver(self, method: str, uri: str | None = None) -> None:
         # Repeating a notification that is still waiting to be sent would
         # only have the client act on the same change twice.
-        if self._queue.empty() or notification != self._last:
-            self._last = notification
-            self._queue.put_nowait(notification)
+        if (method, uri) not in self._queued:
+            self._queued.add((method, uri))
+            self._queue.put_nowait((method, uri))
+
+    async def _next(self) -> JSONRPCNotification | None:
+        """The next notification to send, None once closed."""
+        queued = await self._queue.get()
+        if queued is None:
+            return None
+        # No longer waiting: a change from now on needs its own notification.
+        self._queued.remove(queued)
+        method, uri = queued
+        params: dict[str, object] = {"_meta": {META_SUBSCRIPTION_ID: self.id}}
+        if uri is not None:
+            params["uri"] = uri
+        return {"jsonrpc": "2.0", "method": method, "params": params}
 
     def _close(self) -> None:
         """End the subscription gracefully (server-initiated closure)."""
@@ -220,28 +234,13 @@ class MCPServer:
         """Notify subscribed clients that a resource's contents changed."""
         for subscription in self._subscriptions:
             if uri in subscription.resource_uris:
-                subscription._deliver(
-                    {
-                        "jsonrpc": "2.0",
-                        "method": "notifications/resources/updated",
-                        "params": {
-                            "_meta": {META_SUBSCRIPTION_ID: subscription.id},
-                            "uri": uri,
-                        },
-                    }
-                )
+                subscription._deliver("notifications/resources/updated", uri)
 
     def _list_changed(self, feature: Feature) -> None:
         """Notify subscribed clients that the list of a feature's items changed."""
         for subscription in self._subscriptions:
             if feature in subscription.list_changed:
-                subscription._deliver(
-                    {
-                        "jsonrpc": "2.0",
-                        "method": f"notifications/{feature}/list_changed",
-                        "params": {"_meta": {META_SUBSCRIPTION_ID: subscription.id}},
-                    }
-                )
+                subscription._deliver(f"notifications/{feature}/list_changed")
 
     async def _discover(self, request: MCPRequest) -> DiscoverResult:
         """server/discover endpoint."""
@@ -295,7 +294,7 @@ class MCPServer:
         try:
             # https://modelcontextprotocol.io/specification/2026-07-28/basic/patterns/subscriptions#acknowledgment
             await request._emit(notification)
-            while (update := await subscription._queue.get()) is not None:
+            while (update := await subscription._next()) is not None:
                 await request._emit(update)
         finally:
             self._subscriptions.discard(subscription)
