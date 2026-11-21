@@ -6,9 +6,10 @@ The logic for an MCP server, sans-IO.
 import asyncio
 import secrets
 from collections.abc import Callable, Collection, Mapping
-from typing import Literal, NoReturn
+from typing import Final, Literal, NoReturn
 
 from aiohttp import web
+from pydantic import TypeAdapter, ValidationError
 from yarl import URL
 
 from ._auth import Authorization
@@ -29,24 +30,60 @@ from ._protocol import (
     SubscriptionFilter,
     SubscriptionsListenResult,
 )
+from ._registry import Feature
 from ._resources import ResourceRegistry
 from ._secure_form import RenderForm, handle_form, render_form_default
-from ._tools import RateLimiter, ToolRegistry
+from ._tools import RateLimiter, ToolRegistry, _format_loc
 from ._transport import MCPRequest, Method, handle_request
+
+# https://modelcontextprotocol.io/specification/2026-07-28/basic/patterns/subscriptions#notification-filter
+_LIST_CHANGED: Final[
+    Mapping[Feature, Literal["promptsListChanged", "resourcesListChanged", "toolsListChanged"]]
+] = {
+    "prompts": "promptsListChanged",
+    "resources": "resourcesListChanged",
+    "tools": "toolsListChanged",
+}
+_FILTER: Final = TypeAdapter(SubscriptionFilter)
 
 
 class Subscription:
     """A live ``subscriptions/listen`` stream."""
 
-    __slots__ = ("_queue", "id", "resource_uris")
+    __slots__ = ("_queue", "_queued", "id", "list_changed", "resource_uris")
 
-    def __init__(self, request_id: RequestId, resource_uris: frozenset[str]) -> None:
+    def __init__(
+        self,
+        request_id: RequestId,
+        list_changed: frozenset[Feature],
+        resource_uris: frozenset[str],
+    ) -> None:
         self.id = request_id
+        self.list_changed = list_changed
         self.resource_uris = resource_uris
-        self._queue: asyncio.Queue[JSONRPCNotification | None] = asyncio.Queue()
+        # The (method, uri) of each notification waiting to be sent.
+        self._queue: asyncio.Queue[tuple[str, str | None] | None] = asyncio.Queue()
+        self._queued = set[tuple[str, str | None]]()
 
-    def _deliver(self, notification: JSONRPCNotification) -> None:
-        self._queue.put_nowait(notification)
+    def _deliver(self, method: str, uri: str | None = None) -> None:
+        # Repeating a notification that is still waiting to be sent would
+        # only have the client act on the same change twice.
+        if (method, uri) not in self._queued:
+            self._queued.add((method, uri))
+            self._queue.put_nowait((method, uri))
+
+    async def _next(self) -> JSONRPCNotification | None:
+        """The next notification to send, None once closed."""
+        queued = await self._queue.get()
+        if queued is None:
+            return None
+        # No longer waiting: a change from now on needs its own notification.
+        self._queued.remove(queued)
+        method, uri = queued
+        params: dict[str, object] = {"_meta": {META_SUBSCRIPTION_ID: self.id}}
+        if uri is not None:
+            params["uri"] = uri
+        return {"jsonrpc": "2.0", "method": method, "params": params}
 
     def _close(self) -> None:
         """End the subscription gracefully (server-initiated closure)."""
@@ -122,33 +159,28 @@ class MCPServer:
         has_completions = False
 
         if prompts is not None:
-            if authorization is None and prompts._scoped:
-                raise ValueError("prompts with scopes require authorization to be configured")
-            self._capabilities["prompts"] = {}
+            self._capabilities["prompts"] = prompts._bind(self)
             self._methods["prompts/list"] = Method(prompts._list)
             self._methods["prompts/get"] = Method(
                 prompts._get, scopes=prompts._get_scopes, input_required=True
             )
-            if any(spec.completions for spec in prompts._specs.values()):
+            # A dynamic registry may be given completion handlers later.
+            if prompts._dynamic or any(s.completions for s in prompts._specs.values()):
                 has_completions = True
 
         self._resources = resources
         if resources is not None:
-            if authorization is None and resources._scoped:
-                raise ValueError("resources with scopes require authorization")
-            self._capabilities["resources"] = {"subscribe": True}
+            self._capabilities["resources"] = {"subscribe": True, **resources._bind(self)}
             self._methods["resources/list"] = Method(resources._list)
             self._methods["resources/templates/list"] = Method(resources._templates_list)
             self._methods["resources/read"] = Method(
                 resources._read, scopes=resources._get_scopes, input_required=True
             )
-            if any(spec.completions for spec in resources._templates.values()):
+            if resources._dynamic or any(s.completions for s in resources._templates.values()):
                 has_completions = True
 
         if tools is not None:
-            if authorization is None and tools._scoped:
-                raise ValueError("tools with scopes require authorization")
-            self._capabilities["tools"] = {}
+            self._capabilities["tools"] = tools._bind(self)
             self._methods["tools/list"] = Method(tools._list)
             self._methods["tools/call"] = Method(
                 tools._call, scopes=tools._get_scopes, input_required=True
@@ -202,16 +234,13 @@ class MCPServer:
         """Notify subscribed clients that a resource's contents changed."""
         for subscription in self._subscriptions:
             if uri in subscription.resource_uris:
-                subscription._deliver(
-                    {
-                        "jsonrpc": "2.0",
-                        "method": "notifications/resources/updated",
-                        "params": {
-                            "_meta": {META_SUBSCRIPTION_ID: subscription.id},
-                            "uri": uri,
-                        },
-                    }
-                )
+                subscription._deliver("notifications/resources/updated", uri)
+
+    def _list_changed(self, feature: Feature) -> None:
+        """Notify subscribed clients that the list of a feature's items changed."""
+        for subscription in self._subscriptions:
+            if feature in subscription.list_changed:
+                subscription._deliver(f"notifications/{feature}/list_changed")
 
     async def _discover(self, request: MCPRequest) -> DiscoverResult:
         """server/discover endpoint."""
@@ -227,24 +256,32 @@ class MCPServer:
 
     async def _listen(self, request: MCPRequest) -> SubscriptionsListenResult:
         """subscriptions/listen endpoint."""
-        notifications = request.params.get("notifications", {})
-        if not isinstance(notifications, Mapping):
-            raise MCPError(INVALID_PARAMS, "notifications must be an object")
+        try:
+            notifications = _FILTER.validate_python(
+                request.params.get("notifications", {}), strict=True
+            )
+        except ValidationError as exc:
+            problems = [
+                f"{_format_loc(('notifications', *e['loc']))}: {e['msg']}"
+                for e in exc.errors(include_url=False)
+            ]
+            raise MCPError(INVALID_PARAMS, "; ".join(problems)) from None
 
         # The acknowledged filter reflects the subset the server will honor.
         honored: SubscriptionFilter = {}
+        list_changed = set[Feature]()
+        for feature, field in _LIST_CHANGED.items():
+            # Changes are announced for the registries advertised as dynamic.
+            dynamic = self._capabilities.get(feature, {}).get("listChanged")
+            if dynamic and notifications.get(field):
+                list_changed.add(feature)
+                honored[field] = True
         resource_uris = frozenset[str]()
-        requested = notifications.get("resourceSubscriptions")
-        if requested is not None:
-            if not isinstance(requested, list) or not all(
-                isinstance(uri, str) for uri in requested
-            ):
-                raise MCPError(INVALID_PARAMS, "resourceSubscriptions must be a list of URIs")
-            if self._resources is not None and requested:
-                resource_uris = frozenset(requested)
-                honored["resourceSubscriptions"] = sorted(resource_uris)
+        if self._resources is not None and (uris := notifications.get("resourceSubscriptions")):
+            resource_uris = frozenset(uris)
+            honored["resourceSubscriptions"] = sorted(resource_uris)
 
-        subscription = Subscription(request.id, resource_uris)
+        subscription = Subscription(request.id, frozenset(list_changed), resource_uris)
         self._subscriptions.add(subscription)
         notification: JSONRPCNotification = {
             "jsonrpc": "2.0",
@@ -257,7 +294,7 @@ class MCPServer:
         try:
             # https://modelcontextprotocol.io/specification/2026-07-28/basic/patterns/subscriptions#acknowledgment
             await request._emit(notification)
-            while (update := await subscription._queue.get()) is not None:
+            while (update := await subscription._next()) is not None:
                 await request._emit(update)
         finally:
             self._subscriptions.discard(subscription)

@@ -25,8 +25,9 @@ Resource URI templates support the same mapping, keyed by template variable:
 
 Registering any completion handler enables the ``completions`` capability and
 the ``completion/complete`` method; without one, the method is not served.
-Handlers may also take a first parameter annotated :class:`.MCPRequest` to
-receive the in-flight request.
+A ``dynamic`` registry always enables them, as handlers may be
+registered later. Handlers may also take a first parameter annotated
+:class:`.MCPRequest` to receive the in-flight request.
 
 Results are truncated to 100 values, with information included that there were
 more results. To control this explicitly, return a :class:`.Completion` instead

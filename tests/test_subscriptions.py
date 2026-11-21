@@ -2,6 +2,7 @@
 
 import asyncio
 
+import pytest
 from aiohttp import web
 from pytest_aiohttp import AiohttpClient
 
@@ -54,11 +55,23 @@ async def test_listen_no_filter(make_client: MakeClient) -> None:
     assert ack["params"]["notifications"] == {}
 
 
-async def test_listen_invalid_filter(make_client: MakeClient) -> None:
+@pytest.mark.parametrize(
+    ("notifications", "rejected"),
+    (
+        (5, "notifications"),
+        ({"toolsListChanged": "yes"}, "notifications.toolsListChanged"),  # str -> bool
+        # A str is not a sequence of URIs, although it is a sequence of str.
+        ({"resourceSubscriptions": "docs://a"}, "notifications.resourceSubscriptions"),
+        ({"resourceSubscriptions": ["docs://a", 5]}, "notifications.resourceSubscriptions[1]"),
+    ),
+)
+async def test_listen_invalid_filter(
+    make_client: MakeClient, notifications: object, rejected: str
+) -> None:
     client = await make_client()
     async with client.post(
         "/mcp",
-        json=request_body("subscriptions/listen", {"notifications": 5}),
+        json=request_body("subscriptions/listen", {"notifications": notifications}),
         headers=request_headers("subscriptions/listen"),
     ) as resp:
         assert resp.status == 200
@@ -67,6 +80,7 @@ async def test_listen_invalid_filter(make_client: MakeClient) -> None:
             event = await next_sse_data(resp)
         assert event["id"] == 1
         assert event["error"]["code"] == -32602
+        assert event["error"]["message"].startswith(f"{rejected}: ")
         assert await next_sse(resp) is None
 
 

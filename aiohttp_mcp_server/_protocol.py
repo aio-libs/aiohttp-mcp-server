@@ -12,9 +12,13 @@ from typing import (
     Literal,
     NotRequired,
     Required,
-    TypedDict,
     cast,
 )
+
+if sys.version_info >= (3, 12):
+    from typing import TypedDict
+else:
+    from typing_extensions import TypedDict
 
 if sys.version_info >= (3, 13):
     from typing import ReadOnly

@@ -3,15 +3,17 @@
 import re
 import sys
 from base64 import b64encode
-from collections.abc import Awaitable, Callable, Collection, Mapping, Sequence
+from collections.abc import Awaitable, Callable, Collection, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Generic, Literal, TypeVar, overload
+from typing import TYPE_CHECKING, Final, Generic, Literal, TypeVar, overload
 from urllib.parse import unquote
 
 if sys.version_info >= (3, 12):
     from typing import TypeAliasType
 else:
     from typing_extensions import TypeAliasType
+
+from aiohttp import web
 
 from ._completion import CompletionHandler, _build_completers, _Completer
 from ._content import EmbeddedResource, Icon
@@ -29,6 +31,7 @@ from ._protocol import (
     Role,
     TextResourceContents,
 )
+from ._registry import _Registry
 from ._transport import MCPRequest
 
 _ResourceT = TypeVar("_ResourceT", ResourceInfo, ResourceTemplateInfo)
@@ -170,6 +173,12 @@ class _ResourceSpec(Generic[_ResourceT]):
 
 
 _AnyResourceSpec = _ResourceSpec[ResourceInfo] | _ResourceSpec[ResourceTemplateInfo]
+_Static = dict[str, _ResourceSpec[ResourceInfo]]
+_Templates = dict[str, _ResourceSpec[ResourceTemplateInfo]]
+
+_RESOURCE_KEY: Final[web.RequestKey[tuple[_AnyResourceSpec, dict[str, str]] | None]] = (
+    web.RequestKey("_RESOURCE_KEY")
+)
 
 
 def _parse_template(uri: str) -> tuple[re.Pattern[str], frozenset[str]] | None:
@@ -276,7 +285,23 @@ def _build_template(
     )
 
 
-class ResourceRegistry:
+def _register(
+    static: _Static, templates: _Templates, resources: Iterable[Resource]
+) -> tuple[_Static, _Templates]:
+    """Copies of the specs with ``resources`` registered after them."""
+    static = dict(static)
+    templates = dict(templates)
+    for resource in resources:
+        if resource.uri in static or resource.uri in templates:
+            raise ValueError(f"duplicate resource URI {resource.uri!r}")
+        if (template := _parse_template(resource.uri)) is None:
+            static[resource.uri] = _build_static(resource)
+        else:
+            templates[resource.uri] = _build_template(resource, *template)
+    return static, templates
+
+
+class ResourceRegistry(_Registry):
     """A collection of resources for an MCP server.
 
     :param resources: The resources to serve.
@@ -290,7 +315,13 @@ class ResourceRegistry:
         contents for; resources can override it individually.
     :param read_cache_scope: Cache scope of resource contents; resources can
         override it individually.
+    :param dynamic: Allow the resources to be changed while the registry is
+        being served, with :meth:`add`, :meth:`remove` and :meth:`replace`.
+        Clients are told to expect changes (the ``listChanged`` capability),
+        and are notified of each one.
     """
+
+    _feature = "resources"
 
     def __init__(
         self,
@@ -299,6 +330,7 @@ class ResourceRegistry:
         cache_scope: Literal["public", "private"] = "private",
         read_ttl: float = 60.0,
         read_cache_scope: Literal["public", "private"] = "private",
+        dynamic: bool = False,
     ) -> None:
         if ttl < 0 or read_ttl < 0:
             raise ValueError("ttl must be >= 0")
@@ -309,19 +341,51 @@ class ResourceRegistry:
         self._cache_scope: Literal["public", "private"] = cache_scope
         self._read_ttl_ms = round(read_ttl * 1000)
         self._read_cache_scope: Literal["public", "private"] = read_cache_scope
-        self._static: dict[str, _ResourceSpec[ResourceInfo]] = {}
-        self._templates: dict[str, _ResourceSpec[ResourceTemplateInfo]] = {}
+        super().__init__(dynamic)
+        self._set(*_register({}, {}, resources))
+
+    def add(self, *resources: Resource) -> None:
+        """Register more resources, listed after the existing ones."""
+        self._update(*_register(self._static, self._templates, resources))
+
+    def remove(self, *uris: str) -> None:
+        """Remove the resources with the given URIs (or URI templates)."""
+        static = dict(self._static)
+        templates = dict(self._templates)
+        for uri in uris:
+            if static.pop(uri, None) is None and templates.pop(uri, None) is None:
+                raise LookupError(f"no resource with the URI {uri!r}")
+        self._update(static, templates)
+
+    def replace(self, *resources: Resource) -> None:
+        """Register ``resources`` in place of all the existing ones."""
+        self._update(*_register({}, {}, resources))
+
+    def _set(self, static: _Static, templates: _Templates) -> None:
+        """Serve these specs, indexing the templates for ``_resolve``."""
+        self._static = static
+        self._templates = templates
         self._template_index: dict[str, list[_ResourceSpec[ResourceTemplateInfo]]] = {}
-        for resource in resources:
-            if resource.uri in self._static or resource.uri in self._templates:
-                raise ValueError(f"duplicate resource URI {resource.uri!r}")
-            if (template := _parse_template(resource.uri)) is None:
-                self._static[resource.uri] = _build_static(resource)
-            else:
-                spec = self._templates[resource.uri] = _build_template(resource, *template)
-                self._template_index.setdefault(
-                    _template_index_key(resource.uri), []
-                ).append(spec)
+        for uri, spec in templates.items():
+            self._template_index.setdefault(_template_index_key(uri), []).append(spec)
+
+    def _update(self, static: _Static, templates: _Templates) -> None:
+        """Serve these specs instead, announcing a change of the resource lists."""
+        self._check_change(
+            any(s.scopes for specs in (static, templates) for s in specs.values())
+        )
+        previous = self._listed
+        self._set(static, templates)
+        if previous != self._listed:
+            self._announce()
+
+    @property
+    def _listed(self) -> list[tuple[ResourceInfo | ResourceTemplateInfo, frozenset[str]]]:
+        """Every resource and template, as far as a client listing them can tell."""
+        return [
+            (s.info, s.scopes)
+            for specs in (self._static, self._templates) for s in specs.values()
+        ]
 
     @property
     def _scoped(self) -> bool:
@@ -363,9 +427,16 @@ class ResourceRegistry:
         ]
 
     async def _get_scopes(self, ctx: MCPRequest) -> Collection[str]:
-        """Scope requirements of a ``resources/read`` call (``Method.scopes``)."""
+        """Scope requirements of a ``resources/read`` call (``Method.scopes``).
+
+        The resource is resolved here, once per request, so that ``_read``
+        reads the resource whose scopes were checked even if the registry has
+        changed.
+        """
         uri = ctx.params.get("uri")
-        resolved = self._resolve(uri) if isinstance(uri, str) else None
+        ctx.http[_RESOURCE_KEY] = resolved = (
+            self._resolve(uri) if isinstance(uri, str) else None
+        )
         return () if resolved is None else resolved[0].scopes
 
     async def _list(self, ctx: MCPRequest) -> ListResourcesResult:
@@ -409,7 +480,7 @@ class ResourceRegistry:
         uri = ctx.params.get("uri")
         if not isinstance(uri, str):
             raise MCPError(INVALID_PARAMS, "uri must be a string")
-        resolved = self._resolve(uri)
+        resolved = ctx.http[_RESOURCE_KEY]
         if resolved is None:
             # https://modelcontextprotocol.io/specification/2026-07-28/server/resources#error-handling
             raise MCPError(INVALID_PARAMS, "Resource not found", data={"uri": uri})
