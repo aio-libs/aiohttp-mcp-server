@@ -11,6 +11,7 @@ if sys.version_info >= (3, 12):
 else:
     from typing_extensions import TypeAliasType, TypedDict
 
+from aiohttp import web
 from pydantic import Field, TypeAdapter, ValidationError
 
 from ._handlers import _inspect_handler
@@ -155,6 +156,10 @@ def _build_completers(
     return completers
 
 
+_Target = tuple[_CompleteParams, Mapping[str, _Completer], frozenset[str]]
+_TARGET_KEY: Final[web.RequestKey[_Target | str]] = web.RequestKey("_TARGET_KEY")
+
+
 class _CompletionEndpoint:
     """The ``completion/complete`` method over both feature registries."""
 
@@ -170,9 +175,7 @@ class _CompletionEndpoint:
         self._resources = resources
         self._limiter = rate_limiter
 
-    def _resolve(
-        self, ctx: MCPRequest
-    ) -> tuple[_CompleteParams, Mapping[str, _Completer], frozenset[str]]:
+    def _resolve(self, ctx: MCPRequest) -> _Target:
         """Parse the request and find the referenced item's completers and scopes."""
         try:
             params = _PARAMS.validate_python(ctx.params, strict=True)
@@ -204,12 +207,18 @@ class _CompletionEndpoint:
     async def _get_scopes(self, ctx: MCPRequest) -> Collection[str]:
         """Scope requirements of a ``completion/complete`` (``Method.scopes``).
 
-        Suggestions are as sensitive as the item they complete.
+        Suggestions are as sensitive as the item they complete. The item is
+        resolved here, once per request, so that ``_complete`` completes the
+        item whose scopes were checked even if its registry has changed.
         """
         try:
-            return self._resolve(ctx)[2]
-        except MCPError:
+            ctx.http[_TARGET_KEY] = target = self._resolve(ctx)
+        except MCPError as exc:
+            # Reported by ``_complete``, once the caller is authenticated.
+            # Storing the exception creates reference cycles, so recreate from message.
+            ctx.http[_TARGET_KEY] = exc.message
             return ()
+        return target[2]
 
     async def _complete(self, ctx: MCPRequest) -> CompleteResult:
         """completion/complete endpoint."""
@@ -219,7 +228,10 @@ class _CompletionEndpoint:
                 RATE_LIMITED, "Rate limit exceeded", data={"retryAfter": math.ceil(wait)}
             )
 
-        params, completers, _ = self._resolve(ctx)
+        target = ctx.http[_TARGET_KEY]
+        if isinstance(target, str):
+            raise MCPError(INVALID_PARAMS, target)
+        params, completers, _ = target
 
         argument = params["argument"]
         completer = completers.get(argument["name"])

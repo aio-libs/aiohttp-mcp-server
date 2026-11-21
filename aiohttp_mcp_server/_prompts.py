@@ -1,14 +1,16 @@
 """Prompt templates."""
 
 import sys
-from collections.abc import Awaitable, Callable, Collection, Mapping, Sequence
+from collections.abc import Awaitable, Callable, Collection, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
-from typing import Literal
+from typing import Final, Literal
 
 if sys.version_info >= (3, 12):
     from typing import TypeAliasType
 else:
     from typing_extensions import TypeAliasType
+
+from aiohttp import web
 
 from ._completion import CompletionHandler, _build_completers, _Completer
 from ._content import Content, Icon, TextContent
@@ -23,6 +25,7 @@ from ._protocol import (
     PromptMessage,
     Role,
 )
+from ._registry import _Registry
 from ._transport import MCPRequest
 
 
@@ -92,6 +95,9 @@ class _PromptSpec:
     completions: Mapping[str, _Completer]
 
 
+_PROMPT_KEY: Final[web.RequestKey[_PromptSpec | None]] = web.RequestKey("_PROMPT_KEY")
+
+
 def _build_spec(prompt: Prompt) -> _PromptSpec:
     fn = prompt.handler
     name = _derive_name(fn, prompt.name, "prompt")
@@ -125,7 +131,20 @@ def _build_spec(prompt: Prompt) -> _PromptSpec:
     )
 
 
-class PromptRegistry:
+def _register(
+    specs: Mapping[str, _PromptSpec], prompts: Iterable[Prompt | PromptHandler]
+) -> dict[str, _PromptSpec]:
+    """A copy of ``specs`` with ``prompts`` registered after them."""
+    registered = dict(specs)
+    for prompt in prompts:
+        spec = _build_spec(prompt if isinstance(prompt, Prompt) else Prompt(prompt))
+        if spec.info["name"] in registered:
+            raise ValueError(f"duplicate prompt name {spec.info['name']!r}")
+        registered[spec.info["name"]] = spec
+    return registered
+
+
+class PromptRegistry(_Registry):
     """A collection of prompts for an MCP server.
 
     :param prompts: The prompts: plain ``async`` functions, or :class:`Prompt`
@@ -135,13 +154,20 @@ class PromptRegistry:
         prompts (``"public"``) or only the requesting client
         (``"private"``, the safe default: with authorization configured the
         list may vary by the caller's scopes).
+    :param dynamic: Allow the prompts to be changed while the registry is
+        being served, with :meth:`add`, :meth:`remove` and :meth:`replace`.
+        Clients are told to expect changes (the ``listChanged`` capability),
+        and are notified of each one.
     """
+
+    _feature = "prompts"
 
     def __init__(
         self,
         *prompts: Prompt | PromptHandler,
         ttl: float = 600.0,
         cache_scope: Literal["public", "private"] = "private",
+        dynamic: bool = False,
     ) -> None:
         if ttl < 0:
             raise ValueError("ttl must be >= 0")
@@ -149,12 +175,32 @@ class PromptRegistry:
             raise ValueError("cache_scope must be 'public' or 'private'")
         self._ttl_ms = round(ttl * 1000)
         self._cache_scope: Literal["public", "private"] = cache_scope
-        self._specs: dict[str, _PromptSpec] = {}
-        for prompt in prompts:
-            spec = _build_spec(prompt if isinstance(prompt, Prompt) else Prompt(prompt))
-            if spec.info["name"] in self._specs:
-                raise ValueError(f"duplicate prompt name {spec.info['name']!r}")
-            self._specs[spec.info["name"]] = spec
+        super().__init__(dynamic)
+        self._specs = _register({}, prompts)
+
+    def add(self, *prompts: Prompt | PromptHandler) -> None:
+        """Register more prompts, listed after the existing ones."""
+        self._update(_register(self._specs, prompts))
+
+    def remove(self, *names: str) -> None:
+        """Remove the prompts with the given names."""
+        specs = dict(self._specs)
+        for name in names:
+            if specs.pop(name, None) is None:
+                raise LookupError(f"no prompt named {name!r}")
+        self._update(specs)
+
+    def replace(self, *prompts: Prompt | PromptHandler) -> None:
+        """Register ``prompts`` in place of all the existing ones."""
+        self._update(_register({}, prompts))
+
+    def _update(self, specs: dict[str, _PromptSpec]) -> None:
+        """Serve ``specs`` instead, announcing a change of the prompt list."""
+        self._check_change(any(s.scopes for s in specs.values()))
+        previous = [(s.info, s.scopes) for s in self._specs.values()]
+        self._specs = specs
+        if previous != [(s.info, s.scopes) for s in specs.values()]:
+            self._announce()
 
     @property
     def _scoped(self) -> bool:
@@ -162,9 +208,13 @@ class PromptRegistry:
         return any(spec.scopes for spec in self._specs.values())
 
     async def _get_scopes(self, ctx: MCPRequest) -> Collection[str]:
-        """Scope requirements of a ``prompts/get`` call (``Method.scopes``)."""
+        """Scope requirements of a ``prompts/get`` call (``Method.scopes``).
+
+        The prompt is resolved here, once per request, so that ``_get`` runs
+        the prompt whose scopes were checked even if the registry has changed.
+        """
         name = ctx.params.get("name")
-        spec = self._specs.get(name) if isinstance(name, str) else None
+        ctx.http[_PROMPT_KEY] = spec = self._specs.get(name) if isinstance(name, str) else None
         return () if spec is None else spec.scopes
 
     def _visible(self, ctx: MCPRequest) -> Sequence[_PromptSpec]:
@@ -192,10 +242,9 @@ class PromptRegistry:
 
     async def _get(self, ctx: MCPRequest) -> GetPromptResult:
         """prompts/get endpoint."""
-        name = ctx.params.get("name")
-        spec = self._specs.get(name) if isinstance(name, str) else None
+        spec = ctx.http[_PROMPT_KEY]
         if spec is None:
-            raise MCPError(INVALID_PARAMS, f"Unknown prompt {name!r}")
+            raise MCPError(INVALID_PARAMS, f"Unknown prompt {ctx.params.get('name')!r}")
         arguments = ctx.params.get("arguments", {})
         if not isinstance(arguments, Mapping) or not all(
             isinstance(value, str) for value in arguments.values()

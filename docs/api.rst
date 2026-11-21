@@ -18,6 +18,7 @@ Tools
 =====
 
 .. autoclass:: aiohttp_mcp_server.ToolRegistry
+   :no-show-inheritance:
 
 .. autoclass:: aiohttp_mcp_server.Tool
 
@@ -39,6 +40,7 @@ Prompts
 =======
 
 .. autoclass:: aiohttp_mcp_server.PromptRegistry
+   :no-show-inheritance:
 
 .. autoclass:: aiohttp_mcp_server.Prompt
 
@@ -90,6 +92,7 @@ Resources
 =========
 
 .. autoclass:: aiohttp_mcp_server.ResourceRegistry
+   :no-show-inheritance:
 
 .. autoclass:: aiohttp_mcp_server.Resource
 

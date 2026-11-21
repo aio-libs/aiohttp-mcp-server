@@ -9,12 +9,13 @@ import re
 import sys
 import time
 import types
-from collections.abc import Awaitable, Callable, Collection, Mapping, Sequence
+from collections.abc import Awaitable, Callable, Collection, Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from types import EllipsisType
 from typing import (
     Annotated,
     Any,
+    Final,
     Generic,
     Literal,
     NotRequired,
@@ -25,6 +26,7 @@ from typing import (
     get_type_hints,
 )
 
+from aiohttp import web
 from pydantic import PydanticSchemaGenerationError, TypeAdapter, ValidationError
 from pydantic.json_schema import GenerateJsonSchema
 
@@ -42,6 +44,7 @@ from ._protocol import (
     _InputSchema,
     decode_header_value,
 )
+from ._registry import _Registry
 from ._transport import MCPRequest
 
 if sys.version_info >= (3, 12):
@@ -302,6 +305,9 @@ class _ToolSpec:
     scopes: frozenset[str]
 
 
+_TOOL_KEY: Final[web.RequestKey[_ToolSpec | None]] = web.RequestKey("_TOOL_KEY")
+
+
 def _convert_arguments(
     spec: _ToolSpec, ctx: MCPRequest, arguments: Mapping[str, object]
 ) -> dict[str, object]:
@@ -520,7 +526,20 @@ def _error_result(message: str) -> CallToolResult:
     return {"content": [{"type": "text", "text": message}], "isError": True}
 
 
-class ToolRegistry:
+def _register(
+    specs: Mapping[str, _ToolSpec], tools: Iterable[Tool | ToolHandler]
+) -> dict[str, _ToolSpec]:
+    """A copy of ``specs`` with ``tools`` registered after them."""
+    registered = dict(specs)
+    for tool in tools:
+        spec = _build_spec(tool if isinstance(tool, Tool) else Tool(tool))
+        if spec.info["name"] in registered:
+            raise ValueError(f"duplicate tool name {spec.info['name']!r}")
+        registered[spec.info["name"]] = spec
+    return registered
+
+
+class ToolRegistry(_Registry):
     """A collection of tools for an MCP server.
 
     Tools are listed in registration order; keep it stable so clients can
@@ -539,7 +558,13 @@ class ToolRegistry:
         limit produces an error tool result telling the model how long to
         back off. Pass :data:`None` to disable rate limiting (e.g. if rate
         limiting in a proxy).
+    :param dynamic: Allow the tools to be changed while the registry is being
+        served, with :meth:`add`, :meth:`remove` and :meth:`replace`. Clients
+        are told to expect changes (the ``listChanged`` capability), and are
+        notified of each one.
     """
+
+    _feature = "tools"
 
     def __init__(
         self,
@@ -548,6 +573,7 @@ class ToolRegistry:
         cache_scope: Literal["public", "private"] = "private",
         # TODO(PY315): Use sentinel()
         rate_limiter: RateLimiter | None | EllipsisType = ...,
+        dynamic: bool = False,
     ) -> None:
         if ttl < 0:
             raise ValueError("ttl must be >= 0")
@@ -556,21 +582,45 @@ class ToolRegistry:
         self._ttl_ms = round(ttl * 1000)
         self._cache_scope: Literal["public", "private"] = cache_scope
         self._limiter = RateLimiter() if rate_limiter is Ellipsis else rate_limiter
-        self._specs: dict[str, _ToolSpec] = {}
-        for tool in tools:
-            spec = _build_spec(tool if isinstance(tool, Tool) else Tool(tool))
-            if spec.info["name"] in self._specs:
-                raise ValueError(f"duplicate tool name {spec.info['name']!r}")
-            self._specs[spec.info["name"]] = spec
+        super().__init__(dynamic)
+        self._specs = _register({}, tools)
+
+    def add(self, *tools: Tool | ToolHandler) -> None:
+        """Register more tools, listed after the existing ones."""
+        self._update(_register(self._specs, tools))
+
+    def remove(self, *names: str) -> None:
+        """Remove the tools with the given names."""
+        specs = dict(self._specs)
+        for name in names:
+            if specs.pop(name, None) is None:
+                raise LookupError(f"no tool named {name!r}")
+        self._update(specs)
+
+    def replace(self, *tools: Tool | ToolHandler) -> None:
+        """Register ``tools`` in place of all the existing ones."""
+        self._update(_register({}, tools))
+
+    def _update(self, specs: dict[str, _ToolSpec]) -> None:
+        """Serve ``specs`` instead, announcing a change of the tool list."""
+        self._check_change(any(s.scopes for s in specs.values()))
+        previous = [(s.info, s.scopes) for s in self._specs.values()]
+        self._specs = specs
+        if previous != [(s.info, s.scopes) for s in specs.values()]:
+            self._announce()
 
     @property
     def _scoped(self) -> bool:
         return any(spec.scopes for spec in self._specs.values())
 
     async def _get_scopes(self, ctx: MCPRequest) -> Collection[str]:
-        """Scope requirements of a ``tools/call`` (``Method.scopes``)."""
+        """Scope requirements of a ``tools/call`` (``Method.scopes``).
+
+        The tool is resolved here, once per request, so that ``_call`` runs
+        the tool whose scopes were checked even if the registry has changed.
+        """
         name = ctx.params.get("name")
-        spec = self._specs.get(name) if isinstance(name, str) else None
+        ctx.http[_TOOL_KEY] = spec = self._specs.get(name) if isinstance(name, str) else None
         return spec.scopes if spec is not None else ()
 
     async def _list(self, ctx: MCPRequest) -> ListToolsResult:
@@ -588,11 +638,10 @@ class ToolRegistry:
 
     async def _call(self, ctx: MCPRequest) -> CallToolResult:
         """tools/call endpoint."""
-        name = ctx.params.get("name")
-        spec = self._specs.get(name) if isinstance(name, str) else None
+        spec = ctx.http[_TOOL_KEY]
         if spec is None:
             # https://modelcontextprotocol.io/specification/2026-07-28/server/tools#error-handling
-            raise MCPError(INVALID_PARAMS, f"Unknown tool: {name}")
+            raise MCPError(INVALID_PARAMS, f"Unknown tool: {ctx.params.get('name')}")
         arguments = ctx.params.get("arguments", {})
         if not isinstance(arguments, Mapping):
             raise MCPError(INVALID_PARAMS, "arguments must be an object")
