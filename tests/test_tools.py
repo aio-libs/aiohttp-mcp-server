@@ -384,12 +384,24 @@ async def test_content_annotations_on_results(make_client: MakeClient) -> None:
 
 
 async def test_bare_tool_result_is_unstructured(make_client: MakeClient) -> None:
-    async def lookup() -> ToolResult[object]:
-        assert False
+    async def lookup(fail: bool) -> ToolResult[object]:
+        if fail:
+            return ToolResult(content=(TextContent("Lookup failed."),), is_error=True)
+        return ToolResult(content=(TextContent("2 users"),), structured={"count": 2})
 
     client = await make_client(tools=ToolRegistry(lookup))
     async with post(client, "tools/list") as resp:
         assert "outputSchema" not in (await result_of(resp))["tools"][0]
+    async with call(client, "lookup", {"fail": False}) as resp:
+        result = await result_of(resp)
+    assert result["content"] == [{"type": "text", "text": "2 users"}]
+    assert result["structuredContent"] == {"count": 2}
+    assert "isError" not in result
+    async with call(client, "lookup", {"fail": True}) as resp:
+        result = await result_of(resp)
+    assert result["content"] == [{"type": "text", "text": "Lookup failed."}]
+    assert "structuredContent" not in result
+    assert result["isError"] is True
 
 
 async def test_structured_results_not_validated(make_client: MakeClient) -> None:
