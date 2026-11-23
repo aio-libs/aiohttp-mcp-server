@@ -1,9 +1,13 @@
 import secrets
 import time
+from collections.abc import Awaitable, Callable, Sequence
 from typing import Annotated, TypedDict
 
 import aiohttp_mcp_server as mcp
 from aiohttp import web
+
+index_document: Callable[[str], Awaitable[None]]
+list_documents: Callable[[str], Awaitable[Sequence[str]]]
 
 
 def tools_setup() -> None:
@@ -39,6 +43,15 @@ async def book_flight(date: str) -> str:
         # Actionable feedback the model can self-correct with.
         raise mcp.ToolError("Invalid departure date: must be in the future.")
     return f"Booked a flight on {date}."
+
+
+async def reindex(request: mcp.MCPRequest, collection: str) -> str:
+    """Rebuild the search index of a collection."""
+    documents = await list_documents(collection)
+    for done, document in enumerate(documents, start=1):
+        await index_document(document)
+        request.progress(done, len(documents), f"Indexed {document}")
+    return f"Indexed {len(documents)} documents."
 
 
 def tool_hints() -> None:

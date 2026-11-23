@@ -12,8 +12,9 @@ from typing import (
     Literal,
     NotRequired,
     Required,
-    cast,
 )
+
+from pydantic import TypeAdapter, ValidationError, with_config
 
 if sys.version_info >= (3, 12):
     from typing import TypedDict
@@ -30,7 +31,6 @@ PROTOCOL_VERSIONS: Final = ("2026-07-28",)
 
 # https://modelcontextprotocol.io/specification/2026-07-28/basic#_meta
 META_PROTOCOL_VERSION: Final = "io.modelcontextprotocol/protocolVersion"
-META_CLIENT_INFO: Final = "io.modelcontextprotocol/clientInfo"
 META_CLIENT_CAPABILITIES: Final = "io.modelcontextprotocol/clientCapabilities"
 META_SERVER_INFO: Final = "io.modelcontextprotocol/serverInfo"
 META_SUBSCRIPTION_ID: Final = "io.modelcontextprotocol/subscriptionId"
@@ -152,6 +152,7 @@ RequestMeta = TypedDict(
         "io.modelcontextprotocol/clientInfo": NotRequired[Implementation],
     },
 )
+_REQUEST_META: Final = TypeAdapter(with_config({"extra": "allow"})(RequestMeta))
 
 ResultMeta = TypedDict("ResultMeta", {
     "io.modelcontextprotocol/serverInfo": NotRequired[Implementation]
@@ -195,7 +196,7 @@ class JSONRPCErrorResponse(TypedDict):
 class JSONRPCNotification(TypedDict):
     jsonrpc: Literal["2.0"]
     method: str
-    params: NotRequired[dict[str, object]]
+    params: NotRequired[Mapping[str, object]]
 
 
 # TODO(PY315): closed=True
@@ -240,6 +241,22 @@ SubscriptionsListenResultMetaObject = TypedDict(
 
 class SubscriptionsListenResult(InputResult):
     _meta: Required[ReadOnly[SubscriptionsListenResultMetaObject]]
+
+
+NotificationMetaObject = TypedDict(
+    "NotificationMetaObject",
+    {"io.modelcontextprotocol/subscriptionId": RequestId},
+    total=False
+)
+
+
+# TODO(PY315): closed=True
+class ProgressNotificationParams(TypedDict):
+    _meta: NotRequired[NotificationMetaObject]
+    progressToken: ProgressToken
+    progress: float
+    total: NotRequired[float]
+    message: NotRequired[str]
 
 
 # TODO(PY315): closed=True
@@ -579,19 +596,23 @@ class MCPError(Exception):
         return error
 
 
+def _format_loc(loc: tuple[int | str, ...]) -> str:
+    """Render an error location, stripping the body-envelope prefix."""
+    if loc[:2] == ("params", "arguments") and len(loc) > 2:
+        loc = loc[2:]
+    head, *rest = loc
+    return str(head) + "".join(f"[{p}]" if isinstance(p, int) else f".{p}" for p in rest)
+
+
 def validate_request_meta(meta: object) -> RequestMeta:
-    if not isinstance(meta, dict):
-        raise MCPError(INVALID_PARAMS, "params._meta is required")
-    if not isinstance(meta.get(META_PROTOCOL_VERSION), str):
-        raise MCPError(INVALID_PARAMS, f"_meta[{META_PROTOCOL_VERSION!r}] is required")
-    if not isinstance(meta.get(META_CLIENT_CAPABILITIES), dict):
-        raise MCPError(
-            INVALID_PARAMS, f"_meta[{META_CLIENT_CAPABILITIES!r}] is required"
-        )
-    client_info = meta.get(META_CLIENT_INFO)
-    if client_info is not None and not isinstance(client_info, dict):
-        raise MCPError(INVALID_PARAMS, f"_meta[{META_CLIENT_INFO!r}] must be an object")
-    return cast(RequestMeta, meta)
+    try:
+        return _REQUEST_META.validate_python(meta, strict=True)
+    except ValidationError as exc:
+        problems = [
+            f"{_format_loc(('_meta', *e['loc']))}: {e['msg']}"
+            for e in exc.errors(include_url=False)
+        ]
+        raise MCPError(INVALID_PARAMS, "; ".join(problems)) from None
 
 
 def decode_header_value(value: str) -> str:

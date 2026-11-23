@@ -441,16 +441,21 @@ def generator_scoped_app(
         finally:
             events.append("release")
 
-    async def write_pr(req: MCPRequest) -> None:
+    async def write_pr(req: MCPRequest) -> InputResult | None:
         # The handler reuses what the scopes generator acquired.
         assert req.http[CONN_KEY] is not None
         events.append("handler")
         if req.params.get("boom"):
             raise RuntimeError("handler failed")
+        if req.params.get("unserialisable"):
+            return {"value": object()}  # type: ignore[return-value]
+        return None
 
     async def stream_pr(req: MCPRequest) -> None:
         assert req.http[CONN_KEY] is not None
         events.append("handler")
+        if req.params.get("boom"):
+            raise RuntimeError("handler failed")
 
     server._methods["test/write-pr"] = Method(write_pr, scopes=pr_scopes)
     server._methods["test/stream-pr"] = Method(stream_pr, streaming=True, scopes=pr_scopes)
@@ -498,6 +503,18 @@ async def test_scopes_generator_sees_handler_exception(aiohttp_client: AiohttpCl
     assert events == ["acquire", "handler", "rollback:RuntimeError", "release"]
 
 
+async def test_scopes_generator_sees_unserialisable_result(
+    aiohttp_client: AiohttpClient,
+) -> None:
+    """A result that cannot be sent is a failure of the handler, not a success."""
+    app, events = generator_scoped_app()
+    client = await aiohttp_client(app)
+    params = {"org": "aio-libs", "unserialisable": True}
+    async with post(client, "test/write-pr", params, token="org-token") as resp:
+        assert resp.status == 500
+    assert events == ["acquire", "handler", "rollback:TypeError", "release"]
+
+
 async def test_scopes_generator_streaming(aiohttp_client: AiohttpClient) -> None:
     app, events = generator_scoped_app()
     client = await aiohttp_client(app)
@@ -508,12 +525,36 @@ async def test_scopes_generator_streaming(aiohttp_client: AiohttpClient) -> None
     assert events == ["acquire", "handler", "commit", "release"]
 
 
+async def test_scopes_generator_sees_streaming_handler_exception(
+    aiohttp_client: AiohttpClient,
+) -> None:
+    app, events = generator_scoped_app()
+    client = await aiohttp_client(app)
+    async with post(
+        client, "test/stream-pr", {"org": "aio-libs", "boom": True}, token="org-token"
+    ) as resp:
+        assert resp.content_type == "text/event-stream"
+        assert (await next_sse_data(resp))["error"]["code"] == -32603
+    assert events == ["acquire", "handler", "rollback:RuntimeError", "release"]
+
+
 async def test_scopes_generator_cleanup_failure(aiohttp_client: AiohttpClient) -> None:
     """A failed commit must not look like success on a basic request."""
     app, events = generator_scoped_app(fail_cleanup=True)
     client = await aiohttp_client(app)
     async with post(client, "test/write-pr", {"org": "aio-libs"}, token="org-token") as resp:
         assert resp.status == 500
+    assert events == ["acquire", "handler", "rollback:RuntimeError", "release"]
+
+
+async def test_scopes_generator_streaming_cleanup_failure(
+    aiohttp_client: AiohttpClient,
+) -> None:
+    """Nor on a stream, where the response waits for the commit."""
+    app, events = generator_scoped_app(fail_cleanup=True)
+    client = await aiohttp_client(app)
+    async with post(client, "test/stream-pr", {"org": "aio-libs"}, token="org-token") as resp:
+        assert (await next_sse_data(resp))["error"]["code"] == -32603
     assert events == ["acquire", "handler", "rollback:RuntimeError", "release"]
 
 

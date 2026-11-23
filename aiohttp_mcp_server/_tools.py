@@ -41,6 +41,7 @@ from ._protocol import (
     MCPError,
     ToolAnnotations,
     ToolInfo,
+    _format_loc,
     _InputSchema,
     decode_header_value,
 )
@@ -202,14 +203,6 @@ def _json_schema(
         if defs.setdefault(name, definition) != definition:
             raise ValueError(f"conflicting schema definitions named {name!r} for {context}")
     return schema
-
-
-def _format_loc(loc: tuple[int | str, ...]) -> str:
-    """Render an error location, stripping the body-envelope prefix."""
-    if loc[:2] == ("params", "arguments") and len(loc) > 2:
-        loc = loc[2:]
-    head, *rest = loc
-    return str(head) + "".join(f"[{p}]" if isinstance(p, int) else f".{p}" for p in rest)
 
 
 def _reject_narrowing(original: object, validated: object, context: str, path: str) -> None:
