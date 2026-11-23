@@ -1,5 +1,6 @@
 import asyncio
 import gc
+import math
 import sys
 import weakref
 from contextlib import AbstractAsyncContextManager, suppress
@@ -176,6 +177,30 @@ async def test_progress_cannot_reduce(
     assert result["content"] == [{"type": "text", "text": "raised"}]
 
 
+@pytest.mark.parametrize("token", ("token", None))
+@pytest.mark.parametrize(
+    ("value", "total"),
+    ((math.nan, None), (math.inf, None), (-math.inf, None), (1, math.nan), (1, math.inf)),
+)
+async def test_progress_must_be_finite(
+    make_client: MakeClient, token: ProgressToken | None, value: float, total: float | None
+) -> None:
+    """NaN and infinity have no representation in JSON."""
+
+    async def crunch(request: MCPRequest) -> str:
+        outcome = "accepted"
+        try:
+            request.progress(value, total)
+        except ValueError:
+            outcome = "raised"
+        return outcome
+
+    client = await make_client(tools=ToolRegistry(crunch))
+    async with call(client, "crunch", token=token) as resp:
+        result = (await resp.json())["result"]
+    assert result["content"] == [{"type": "text", "text": "raised"}]
+
+
 async def test_progress_is_rate_limited(make_client: MakeClient) -> None:
     sent = asyncio.Event()
 
@@ -267,6 +292,7 @@ async def test_unhandled_error_after_progress(
     assert isinstance(record.exc_info[1], RuntimeError)
 
 
+@pytest.mark.skipif(sys.implementation.name != "cpython", reason="Needs reference counting")
 async def test_failed_request_is_released(make_client: MakeClient) -> None:
     """Without waiting for the garbage collector to find it in a reference cycle."""
     held: list[weakref.ref[asyncio.Event]] = []
