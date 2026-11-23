@@ -215,6 +215,10 @@ class MCPRequest:
         :param total: The progress at which the request will be complete, if known.
         :param message: A human-readable description of the current progress.
         """
+        if not math.isfinite(progress) or (
+            total is not None and not math.isfinite(total)
+        ):
+            raise ValueError("Progress and total must be finite")
         if progress < self._progress_last:
             raise ValueError(f"Progress must increase from the last call ({self._progress_last})")
         unchanged = progress == self._progress_last
