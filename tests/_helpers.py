@@ -7,7 +7,7 @@ from typing import Any
 from aiohttp import ClientResponse, web
 from aiohttp.test_utils import TestClient
 
-from aiohttp_mcp_server._protocol import JSONRPCRequest, RequestId
+from aiohttp_mcp_server._protocol import JSONRPCRequest, ProgressToken, RequestId
 
 MakeClient = Callable[..., Awaitable[TestClient[web.Request, web.Application]]]
 
@@ -24,19 +24,20 @@ def request_body(
     *,
     request_id: RequestId = 1,
     capabilities: dict[str, object] | None = None,
+    progress_token: ProgressToken | None = None,
 ) -> JSONRPCRequest:
     """A fully valid request envelope; deviation tests mutate the result."""
+    meta: dict[str, object] = {
+        META_VERSION: PROTOCOL_VERSION,
+        META_CAPABILITIES: capabilities if capabilities is not None else {},
+    }
+    if progress_token is not None:
+        meta["progressToken"] = progress_token
     return {
         "jsonrpc": "2.0",
         "id": request_id,
         "method": method,
-        "params": {
-            **(params or {}),
-            "_meta": {
-                META_VERSION: PROTOCOL_VERSION,
-                META_CAPABILITIES: capabilities if capabilities is not None else {},
-            },
-        },
+        "params": {**(params or {}), "_meta": meta},
     }
 
 

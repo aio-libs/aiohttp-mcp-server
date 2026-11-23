@@ -21,8 +21,9 @@ from ._protocol import (
     CompleteResult,
     CompletionValues,
     MCPError,
+    _format_loc,
 )
-from ._tools import RateLimiter, _format_loc
+from ._tools import RateLimiter
 from ._transport import MCPRequest
 
 if TYPE_CHECKING:

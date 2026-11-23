@@ -2,6 +2,7 @@
 
 from typing import Any
 
+import pytest
 from aiohttp import ClientResponse, web
 from pytest_aiohttp import AiohttpClient
 
@@ -146,6 +147,26 @@ async def test_unsupported_version(make_client: MakeClient) -> None:
     }
 
 
+async def test_unsupported_version_with_unknown_meta_shape(make_client: MakeClient) -> None:
+    """Another version's ``_meta`` cannot be judged by ours, so the version is what's wrong."""
+    client = await make_client()
+    body = request_body("server/discover")
+    meta = body["params"]["_meta"]
+    meta[META_VERSION] = "2027-01-01"  # type: ignore[index]
+    meta["io.modelcontextprotocol/clientInfo"] = {"name": "client"}  # type: ignore[index]
+    del meta[META_CAPABILITIES]  # type: ignore[attr-defined]
+    async with client.post(
+        "/mcp",
+        json=body,
+        headers=request_headers("server/discover", header_version="2027-01-01"),
+    ) as resp:
+        error = await assert_error(resp, 400, -32022)
+    assert error["error"]["data"] == {
+        "supported": [PROTOCOL_VERSION],
+        "requested": "2027-01-01",
+    }
+
+
 async def test_missing_method_header(make_client: MakeClient) -> None:
     client = await make_client()
     headers = request_headers("server/discover")
@@ -192,6 +213,42 @@ async def test_missing_meta_version(make_client: MakeClient) -> None:
         "/mcp", json=body, headers=request_headers("server/discover")
     ) as resp:
         await assert_error(resp, 400, -32602)
+
+
+@pytest.mark.parametrize("token", (1.5, True, ["abc"]))
+async def test_invalid_progress_token(make_client: MakeClient, token: object) -> None:
+    client = await make_client()
+    body = request_body("server/discover")
+    body["params"]["_meta"]["progressToken"] = token  # type: ignore[index]
+    async with client.post(
+        "/mcp", json=body, headers=request_headers("server/discover")
+    ) as resp:
+        await assert_error(resp, 400, -32602)
+
+
+async def test_malformed_capabilities(make_client: MakeClient) -> None:
+    client = await make_client()
+    body = request_body("server/discover", capabilities={"elicitation": "form"})
+    async with client.post(
+        "/mcp", json=body, headers=request_headers("server/discover")
+    ) as resp:
+        await assert_error(resp, 400, -32602)
+
+
+async def test_unknown_meta_is_kept(make_client: MakeClient) -> None:
+    """Keys this library does not use, such as trace context, still reach handlers."""
+
+    async def trace(request: mcp.MCPRequest) -> str:
+        capabilities = request.meta["io.modelcontextprotocol/clientCapabilities"]
+        return f"{request.meta.get('traceparent')} {capabilities.get('roots')}"
+
+    client = await make_client(tools=mcp.ToolRegistry(trace))
+    body = request_body("tools/call", {"name": "trace"}, capabilities={"roots": {}})
+    body["params"]["_meta"]["traceparent"] = "00-0af7-00f0-01"  # type: ignore[index]
+    headers = {**request_headers("tools/call"), "Mcp-Name": "trace"}
+    async with client.post("/mcp", json=body, headers=headers) as resp:
+        result = (await resp.json())["result"]
+    assert result["content"] == [{"type": "text", "text": "00-0af7-00f0-01 {}"}]
 
 
 async def test_null_id(make_client: MakeClient) -> None:

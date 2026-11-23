@@ -54,6 +54,18 @@ or trying again at a later time).
 .. literalinclude:: code/tools.py
    :pyobject: book_flight
 
+Progress
+========
+
+Handlers can report progress to the client with :meth:`.MCPRequest.progress`:
+
+.. literalinclude:: code/tools.py
+   :pyobject: reindex
+
+Progress is only sent to clients that asked for it, so a handler can report it
+unconditionally. Progress can also be reported from :doc:`prompt <prompts>` and
+:doc:`resource <resources>` handlers.
+
 Tools that need state
 =====================
 

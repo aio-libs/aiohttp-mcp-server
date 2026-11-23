@@ -1,9 +1,11 @@
 """Streamable HTTP transport binding."""
 
 import asyncio
+import copy
 import inspect
 import json
 import logging
+import math
 from collections.abc import (
     AsyncGenerator,
     Awaitable,
@@ -13,9 +15,9 @@ from collections.abc import (
     Mapping,
     Sequence,
 )
-from contextlib import suppress
+from contextlib import AsyncExitStack, suppress
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, TypeAlias, cast
+from typing import TYPE_CHECKING, Final, Self, TypeAlias, cast
 
 from aiohttp import web
 from aiohttp_sse import EventSourceResponse, sse_response
@@ -53,6 +55,7 @@ from ._protocol import (
     JSONRPCNotification,
     JSONRPCResultResponse,
     MCPError,
+    ProgressNotificationParams,
     RequestId,
     RequestMeta,
     Result,
@@ -67,6 +70,26 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger("aiohttp_mcp_server")
 
+# Minimum seconds between the progress notifications of a request.
+# https://modelcontextprotocol.io/specification/2026-07-28/basic/patterns/progress#implementation-notes
+_PROGRESS_INTERVAL: Final = 0.1
+
+
+class _Disconnected(Exception):
+    """The client closed the response stream, which cancels its request."""
+
+
+def _encode(message: JSONRPCNotification | JSONRPCResultResponse | JSONRPCErrorResponse) -> str:
+    return json.dumps(message, separators=(",", ":"))
+
+
+async def _send(stream: EventSourceResponse, data: str) -> None:
+    """Send a message on a response stream; ``_Disconnected`` if the client closed it."""
+    try:
+        await stream.send(data)
+    except (ConnectionError, TimeoutError):
+        raise _Disconnected from None
+
 
 class MCPRequest:
     """An in-flight MCP request, as seen by a method handler."""
@@ -75,6 +98,9 @@ class MCPRequest:
         "_body": None,
         "_form_tickets": None,
         "_input_responses": None,
+        "_progress": None,
+        "_progress_last": None,
+        "_progress_waiter": None,
         "_request_state": None,
         "_resp": None,
         "_responses": None,
@@ -118,7 +144,12 @@ class MCPRequest:
         self._request_state = request_state
         self._responses: Mapping[str, object] = input_responses or {}
         self._form_tickets: Mapping[str, str] = {}
+        # The response stream, once one has been opened.
         self._resp: EventSourceResponse | None = None
+        # The params of the latest progress notification waiting to be sent.
+        self._progress: ProgressNotificationParams | None = None
+        self._progress_last = -math.inf
+        self._progress_waiter: asyncio.Future[None] | None = None
 
     @property
     def auth(self) -> TokenInfo | None:
@@ -164,12 +195,47 @@ class MCPRequest:
         registry = self._server._resources
         if registry is None:
             raise LookupError("no resources are configured")
-        return await registry._embed(self, uri)
+        return await registry._embed(self._without_progress(), uri)
+
+    def _without_progress(self) -> Self:
+        """This request as seen by a handler whose progress is not the request's."""
+        request = copy.copy(self)
+        meta = self.meta.copy()
+        meta.pop("progressToken", None)
+        request.meta = meta
+        request._progress_last = -math.inf
+        return request
+
+    def progress(
+        self, progress: float, total: float | None = None, message: str | None = None
+    ) -> None:
+        """Update a client that requested progress notifications on the call's progress.
+
+        :param progress: The progress made so far. Must increase with each call.
+        :param total: The progress at which the request will be complete, if known.
+        :param message: A human-readable description of the current progress.
+        """
+        if progress < self._progress_last:
+            raise ValueError(f"Progress must increase from the last call ({self._progress_last})")
+        unchanged = progress == self._progress_last
+        # Recorded even when nobody is listening, so a reduction always raises.
+        self._progress_last = progress
+        token = self.meta.get("progressToken")
+        if token is None or unchanged:
+            return
+        params: ProgressNotificationParams = {"progressToken": token, "progress": progress}
+        if total is not None:
+            params["total"] = total
+        if message is not None:
+            params["message"] = message
+        self._progress = params
+        if self._progress_waiter is not None and not self._progress_waiter.done():
+            self._progress_waiter.set_result(None)
 
     async def _emit(self, message: JSONRPCNotification) -> None:
         if self._resp is None:
             raise RuntimeError("Method is not registered as streaming")
-        await self._resp.send(json.dumps(message, separators=(",", ":")))
+        await _send(self._resp, _encode(message))
 
 
 Handler: TypeAlias = Callable[[MCPRequest], Coroutine[None, None, InputResult | None]]
@@ -232,7 +298,7 @@ async def _unwind_scopes(
         await gen.aclose()
 
 
-async def _finish_scopes(gen: "AsyncGenerator[Collection[str], None]") -> None:
+async def _finish_scopes(gen: AsyncGenerator[Collection[str], None]) -> None:
     """Resume the scopes generator past its ``yield`` after a successful call."""
     try:
         await anext(gen)
@@ -282,8 +348,13 @@ async def _serve_request(server: "MCPServer", request: web.Request) -> web.Strea
                 f"versions: {', '.join(PROTOCOL_VERSIONS)}",
                 data={"supported": list(PROTOCOL_VERSIONS)},
             )
-        meta = validate_request_meta(params.pop("_meta", None))
-        _validate_headers(request, message["method"], params, meta[META_PROTOCOL_VERSION])
+        raw_meta = params.pop("_meta", None)
+        version = raw_meta.get(META_PROTOCOL_VERSION) if isinstance(raw_meta, dict) else None
+        if isinstance(version, str):
+            # Before the rest of _meta, whose shape is only known for our versions.
+            _validate_version(request, version)
+        meta = validate_request_meta(raw_meta)
+        _validate_headers(request, message["method"], params)
         method = server._methods.get(message["method"])
         if method is None:
             raise MCPError(METHOD_NOT_FOUND, f"Unknown method {message['method']!r}")
@@ -334,29 +405,12 @@ async def _serve_request(server: "MCPServer", request: web.Request) -> web.Strea
     assert ctx is not None and method is not None  # Errors were handled above
 
     try:
-        if method.input_required:
-            # Needs the authenticated principal, so cannot happen earlier.
-            _load_request_state(server._state_signer, ctx)
-        if method.streaming:
-            response = await _streaming_request(server, ctx, method)
-        else:
-            response = await _basic_request(server, ctx, method)
-    except BaseException as exc:
-        if scopes_gen is not None:
-            await _unwind_scopes(scopes_gen, exc)
-        if isinstance(exc, MCPError) and exc.request_id is None:
-            exc.request_id = request_id
+        # A response stream opened for the request lives as long as the stack.
+        async with AsyncExitStack() as stack:
+            return await _respond(server, ctx, method, scopes_gen, stack)
+    except MCPError as exc:
+        exc.request_id = request_id
         raise
-    if scopes_gen is not None:
-        if method.streaming:
-            # The response is already on the wire; nothing can be returned.
-            try:
-                await _finish_scopes(scopes_gen)
-            except Exception:
-                logger.exception("Scope resource cleanup failed")
-        else:
-            await _finish_scopes(scopes_gen)
-    return response
 
 
 def _validate_message(message: object) -> tuple[RequestId, dict[str, object]]:
@@ -377,10 +431,8 @@ def _validate_message(message: object) -> tuple[RequestId, dict[str, object]]:
             raise MCPError(INVALID_REQUEST, "Invalid Request")
 
 
-def _validate_headers(
-    request: web.Request, method: str, params: Mapping[str, object], meta_version: str
-) -> None:
-    # https://modelcontextprotocol.io/specification/2026-07-28/basic/transports/streamable-http#server-validation
+def _validate_version(request: web.Request, meta_version: str) -> None:
+    # https://modelcontextprotocol.io/specification/2026-07-28/basic/transports/streamable-http#protocol-version-header
     header_version = request.headers.get(PROTOCOL_VERSION_HDR)
     if header_version is None:
         raise MCPError(HEADER_MISMATCH, f"Missing {PROTOCOL_VERSION_HDR} header")
@@ -397,6 +449,9 @@ def _validate_headers(
             data={"supported": list(PROTOCOL_VERSIONS), "requested": header_version},
         )
 
+
+def _validate_headers(request: web.Request, method: str, params: Mapping[str, object]) -> None:
+    # https://modelcontextprotocol.io/specification/2026-07-28/basic/transports/streamable-http#server-validation
     header_method = request.headers.get(METHOD_HDR)
     if header_method is None:
         raise MCPError(HEADER_MISMATCH, f"Missing {METHOD_HDR} header")
@@ -419,78 +474,142 @@ def _validate_headers(
             )
 
 
-async def _basic_request(
-    server: "MCPServer", ctx: MCPRequest, method: Method
+async def _respond(
+    server: "MCPServer",
+    ctx: MCPRequest,
+    method: Method,
+    scopes_gen: AsyncGenerator[Collection[str], None] | None,
+    stack: AsyncExitStack,
 ) -> web.StreamResponse:
-    """A plain request/response method call (no SSE)."""
+    """Call the method and answer the request with its outcome.
+
+    The answer is a single JSON object, unless a response stream was opened
+    for the call: then it is the final message on that stream.
+    """
     try:
-        result = await method.handler(ctx)
-    except InputRequired as exc:
-        result = _input_required_result(ctx, method.input_required, exc)
-    envelope: JSONRPCResultResponse = {
-        "jsonrpc": "2.0",
-        "id": ctx.id,
-        "result": _finalize_result(server, result),
-    }
-    return web.json_response(envelope)
-
-
-async def _streaming_request(
-    server: "MCPServer", ctx: MCPRequest, method: Method
-) -> web.StreamResponse:
-    async with sse_response(
-        ctx.http,
-        ping_interval=server._sse_keepalive,
-        allow_all_methods=True,
-    ) as resp:
-        ctx._resp = resp
-        task = asyncio.create_task(method.handler(ctx))
-
         try:
-            # While task not done.
-            while not (await asyncio.wait({task}, timeout=server._sse_keepalive))[0]:
-                if not resp.is_connected():
-                    task.cancel()
-                    with suppress(asyncio.CancelledError):
-                        await task
-                    return resp
-        except asyncio.CancelledError:
+            if method.input_required:
+                # Needs the authenticated principal, so cannot happen earlier.
+                _load_request_state(server._state_signer, ctx)
+            result = await _run(server, ctx, method, stack)
+            # Encoded here, as a result that cannot be is the handler's failure.
+            answer = _encode(
+                {"jsonrpc": "2.0", "id": ctx.id, "result": _finalize_result(server, result)}
+            )
+        except BaseException as exc:
+            if scopes_gen is not None:
+                await _unwind_scopes(scopes_gen, exc)
+            raise
+        if scopes_gen is not None:
+            await _finish_scopes(scopes_gen)
+    except _Disconnected:
+        assert ctx._resp is not None
+        return ctx._resp  # Nobody is left to answer.
+    except Exception as exc:
+        if ctx._resp is None:
+            raise  # Nothing has been sent, so the error forms the whole response.
+        if not isinstance(exc, MCPError):
+            logger.exception("Unhandled error in MCP method %r", ctx.method)
+            exc = MCPError(INTERNAL_ERROR, "Internal error")
+        answer = _encode(error_envelope(exc, ctx.id))
+    if ctx._resp is None:
+        return web.json_response(text=answer)
+    with suppress(_Disconnected):
+        await _send(ctx._resp, answer)
+    return ctx._resp
+
+
+async def _run(
+    server: "MCPServer", ctx: MCPRequest, method: Method, stack: AsyncExitStack
+) -> InputResult | None:
+    """Run the method's handler, attending to the client meanwhile if it may stream."""
+    if method.streaming:
+        await _open_stream(server, ctx, stack)
+    elif ctx.meta.get("progressToken") is None:
+        # No progress requested, so not an SSE stream.
+        return await _call(ctx, method)
+    task = asyncio.create_task(_call(ctx, method))
+    try:
+        try:
+            await _supervise(server, ctx, task, stack)
+        except BaseException:
+            # The handler does not outlive its request.
             task.cancel()
             with suppress(asyncio.CancelledError):
                 await task
             raise
+        return await task
+    finally:
+        # An exception's traceback holds this frame, which would otherwise hold
+        # the task holding the exception: a cycle keeping the request alive.
+        del task
 
-        envelope: JSONRPCResultResponse | JSONRPCErrorResponse
-        try:
-            result = task.result()
-        except InputRequired as mrtr:
-            try:
-                result = _input_required_result(ctx, method.input_required, mrtr)
-            except MCPError as exc:
-                envelope = error_envelope(exc, ctx.id)
-            else:
-                envelope = {
-                    "jsonrpc": "2.0",
-                    "id": ctx.id,
-                    "result": _finalize_result(server, result),
-                }
-        except MCPError as exc:
-            envelope = error_envelope(exc, ctx.id)
-        except ConnectionError:
-            return resp
-        except Exception:
-            logger.exception("Unhandled error in MCP method %r", ctx.method)
-            envelope = error_envelope(MCPError(INTERNAL_ERROR, "Internal error"), ctx.id)
-        else:
-            envelope = {
-                "jsonrpc": "2.0",
-                "id": ctx.id,
-                "result": _finalize_result(server, result),
-            }
 
-        with suppress(ConnectionError):
-            await resp.send(json.dumps(envelope, separators=(",", ":")))
-        return resp
+async def _call(ctx: MCPRequest, method: Method) -> InputResult | None:
+    """Call the method's handler, turning a request for input into its result."""
+    try:
+        return await method.handler(ctx)
+    except InputRequired as exc:
+        return _input_required_result(ctx, method.input_required, exc)
+
+
+async def _supervise(
+    server: "MCPServer",
+    ctx: MCPRequest,
+    task: asyncio.Task[InputResult | None],
+    stack: AsyncExitStack,
+) -> None:
+    """Attend to the client while the handler runs in ``task``.
+
+    Sends the progress the handler reports, opening the response stream once
+    there is some to send, and raises ``_Disconnected`` if the client closes
+    that stream.
+    """
+    loop = asyncio.get_running_loop()
+    stream = ctx._resp
+    if stream is None:
+        # The response only becomes a stream if there is progress to send.
+        # An eagerly started handler may have reported some already.
+        if ctx._progress is None:
+            ctx._progress_waiter = waiter = loop.create_future()
+            await asyncio.wait({task, waiter}, return_when=asyncio.FIRST_COMPLETED)
+        transport = ctx.http.transport
+        if task.done() or transport is None or transport.is_closing():
+            # Should the client have left already, this stays a plain request.
+            return
+        stream = await _open_stream(server, ctx, stack)
+
+    # The response supersedes any progress still waiting to be sent.
+    while not task.done():
+        if not stream.is_connected():
+            raise _Disconnected
+        if ctx._progress is None:
+            ctx._progress_waiter = waiter = loop.create_future()
+            # The stream is checked for its client at the keep-alive interval.
+            await asyncio.wait(
+                {task, waiter},
+                timeout=server._sse_keepalive,
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            continue
+        notification: JSONRPCNotification = {
+            "jsonrpc": "2.0",
+            "method": "notifications/progress",
+            "params": ctx._progress,
+        }
+        ctx._progress = None
+        await _send(stream, _encode(notification))
+        await asyncio.wait({task}, timeout=_PROGRESS_INTERVAL)
+
+
+async def _open_stream(
+    server: "MCPServer", ctx: MCPRequest, stack: AsyncExitStack
+) -> EventSourceResponse:
+    """Open the response stream of the request, to be closed along with ``stack``."""
+    ctx._resp = await stack.enter_async_context(
+        sse_response(ctx.http, ping_interval=server._sse_keepalive, allow_all_methods=True)
+    )
+    return ctx._resp
 
 
 def _finalize_result(server: "MCPServer", result: InputResult | None) -> Result:

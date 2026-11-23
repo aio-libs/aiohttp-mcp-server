@@ -29,11 +29,12 @@ from ._protocol import (
     ServerCapabilities,
     SubscriptionFilter,
     SubscriptionsListenResult,
+    _format_loc,
 )
 from ._registry import Feature
 from ._resources import ResourceRegistry
 from ._secure_form import RenderForm, handle_form, render_form_default
-from ._tools import RateLimiter, ToolRegistry, _format_loc
+from ._tools import RateLimiter, ToolRegistry
 from ._transport import MCPRequest, Method, handle_request
 
 # https://modelcontextprotocol.io/specification/2026-07-28/basic/patterns/subscriptions#notification-filter
