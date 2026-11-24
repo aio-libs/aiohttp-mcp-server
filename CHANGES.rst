@@ -25,9 +25,6 @@ CHANGES
 - A notification that is still waiting to be sent to a subscribed client is no longer
   repeated, so a burst of ``MCPServer.resource_updated()`` calls for one resource
   sends a single notification.
-- Raised the minimum versions of ``aiohttp`` to 3.14 and of ``PyJWT`` (for the
-  ``jwt`` extra) to 2.9. Older versions were allowed by the package metadata but
-  never worked.
 
 0.2.1 (2026-11-19)
 ==================
